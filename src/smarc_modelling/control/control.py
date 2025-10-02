@@ -150,7 +150,7 @@ class NMPC:
         self.ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
         self.ocp.solver_options.hpipm_mode = 'ROBUST'
         self.ocp.solver_options.hessian_approx = 'GAUSS_NEWTON'
-        self.ocp.solver_options.integrator_type = 'IRK'
+        self.ocp.solver_options.integrator_type = 'ERK'
         self.ocp.solver_options.sim_method_newton_iter = 2 #3 default
 
         self.ocp.solver_options.nlp_solver_type = 'SQP_RTI'
@@ -180,7 +180,7 @@ class NMPC:
         sim.parameter_values = np.zeros(25)
 
         sim.solver_options.T = 0.1
-        sim.solver_options.integrator_type = 'IRK'
+        sim.solver_options.integrator_type = 'ERK'
 
         sim_json = os.path.join(save_dir, 'acados_sim_' + self.model.name + '.json')
 
