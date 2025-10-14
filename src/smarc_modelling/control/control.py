@@ -58,27 +58,27 @@ class NMPC:
         # State weight matrix
         Q_diag = np.ones(nx)
         Q_diag[ 0:2 ] = 100     # Position:         standard 10
-        Q_diag[ 2 ] = 500       # z-Position:         standard 10
-        Q_diag[ 3:7 ] = 10       # Quaternion:       standard 10
+        Q_diag[ 2 ] = 1e4 # z-Position:         standard 10
+        Q_diag[ 3:7 ] = 1e-3       # Quaternion:       standard 10
         Q_diag[ 7:10] = 1       # linear velocity:  standard 1
         Q_diag[10:13] = 1       # Angular velocity: standard 1
 
         # Control weight matrix - Costs set according to Bryson's rule
-        Q_diag[13] = 1e-5            # VBS:      Standard: 1e-4
-        Q_diag[14] = 1e-5            # LCG:      Standard: 1e-4
-        Q_diag[ 15  ] = 5e2             # stern_angle:   Standard: 100
-        Q_diag[ 16  ] = 1e3             # rudder_angle:  Standard: 100
+        Q_diag[13] = 1e-4            # VBS:      Standard: 1e-4
+        Q_diag[14] = 1e-3            # LCG:      Standard: 1e-4
+        Q_diag[ 15  ] = 1e1             # stern_angle:   Standard: 100
+        Q_diag[ 16  ] = 1e1             # rudder_angle:  Standard: 100
         Q_diag[17:  ] = 1e-5            # RPM1 And RPM2: Standard: 1e-6
-        Q_diag[13:  ] = Q_diag[13:  ]   # Adjustment to all control weights
+        #Q_diag[13:  ] = Q_diag[13:  ]   # Adjustment to all control weights
         Q = np.diag(Q_diag)
 
         # Control rate of change weight matrix - control inputs as [x_vbs, x_lcg, delta_s, delta_r, rpm1, rpm2]
         R_diag = np.ones(nu)
         R_diag[0] = 1e-1        # VBS
-        R_diag[1] = 1e-1        # LCG
-        R_diag[2:4] = 1e2
+        R_diag[1] = 1e-0        # LCG
+        R_diag[2:4] = 1e1
         R_diag[4: ] = 1e-5
-        R = np.diag(R_diag)*1e-3
+        R = np.diag(R_diag)#*1e-3
 
         # Stage costs
         self.model.p = ca.MX.sym('ref_param', nx+nu,1)
@@ -137,10 +137,10 @@ class NMPC:
 
         # penalty weights (size must equal len(idxsbx))
         n_sb = idxsbx.size
-        self.ocp.cost.Zl = 50*np.ones(n_sb)
-        self.ocp.cost.Zu = 50*np.ones(n_sb)
-        self.ocp.cost.zl =  5*np.ones(n_sb)
-        self.ocp.cost.zu =  5*np.ones(n_sb)
+        self.ocp.cost.Zl = 1e3*np.ones(n_sb)
+        self.ocp.cost.Zu = 1e3*np.ones(n_sb)
+        self.ocp.cost.zl = 1e5*np.ones(n_sb)
+        self.ocp.cost.zu = 1e5*np.ones(n_sb)
 
         # ----------------------- Solver Setup --------------------------
         # set prediction horizon
