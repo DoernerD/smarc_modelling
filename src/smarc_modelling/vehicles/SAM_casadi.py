@@ -180,6 +180,10 @@ class Propellers:
         self.rpm_dot_min = np.zeros(n_p) - 100  # Max deceleration (RPM/s)
         self.rpm_dot_max = np.zeros(n_p) + 100  # Max acceleration (RPM/s)
 
+        # TV bounds
+        self.tv_dot_min = -0.5
+        self.tv_dot_max = 0.5
+
 
 # Class Vehicle
 class SAM_casadi():
@@ -245,8 +249,8 @@ class SAM_casadi():
 
         # Rigid-body mass matrix expressed in CO
         u_init = np.zeros(6)
-        u_init[0] = 50 #72 
-        u_init[1] = 50 #75 #45
+        u_init[0] = 75 #72 # VBS
+        u_init[1] = 50 #75 #45 # LCG
         self.x_vbs_init = self.calculate_vbs_position(u_init)
         # Update actuators
         self.x_vbs = self.calculate_vbs_position(u_init) 
@@ -806,6 +810,12 @@ class SAM_casadi():
         u_dot[1] = ca.if_else(ca.fabs(u_dot[1]) > self.lcg.x_lcg_dot_max,
                           self.lcg.x_lcg_dot_max * ca.sign(u_dot[1]),
                           u_dot[1])
+        #u_dot[2] = ca.if_else(ca.fabs(u_dot[2]) > self.propellers.tv_dot_max,
+        #                  self.propellers.tv_dot_max* ca.sign(u_dot[2]),
+        #                  u_dot[2])
+        #u_dot[3] = ca.if_else(ca.fabs(u_dot[3]) > self.propellers.tv_dot_max,
+        #                  self.propellers.tv_dot_max* ca.sign(u_dot[3]),
+        #                  u_dot[3])
         return u_dot
 
     def update_dt(self, dt):
