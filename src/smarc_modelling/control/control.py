@@ -28,8 +28,8 @@ class NMPC:
         # State weight matrix
         Q_diag = np.ones(self.nx)
         Q_diag[ 0 ] = 500     # Position:         standard 10
-        Q_diag[ 1 ] = 10     # Position:         standard 10
-        Q_diag[ 2 ] = 100       # z-Position:         standard 10
+        Q_diag[ 1 ] = 100     # Position:         standard 10
+        Q_diag[ 2 ] = 250       # z-Position:         standard 10
         Q_diag[ 3:7 ] = 1       # Quaternion:       standard 10
         Q_diag[ 7:10] = 1       # linear velocity:  standard 1
         Q_diag[10:13] = 1       # Angular velocity: standard 1
@@ -45,10 +45,10 @@ class NMPC:
 
         # Control rate of change weight matrix - control inputs as [x_vbs, x_lcg, delta_s, delta_r, rpm1, rpm2]
         R_diag = np.ones(self.nu)
-        R_diag[0] = 1e-1        # VBS
+        R_diag[0] = 5e-1        # VBS
         R_diag[1] = 1e-1        # LCG
-        R_diag[2] = 1e2
-        R_diag[3] = 1e3
+        R_diag[2] = 10e2
+        R_diag[3] = 10e3
         R_diag[4: ] = 1e-5
         R = np.diag(R_diag)*1e-3
 
@@ -70,14 +70,15 @@ class NMPC:
         # --------------------- Constraint Setup --------------------------
         vbs_dot = 200   # Maximum rate of change for the VBS
         lcg_dot = 50    # Maximum rate of change for the LCG
+        tv_dot = 0.5    # Maximum rate of change for the thrust vectoring
 
         # Declare initial state
         self.ocp.constraints.x0 = np.zeros((self.nx,)) # Initial state is zero. This is set in the sim. for-loop
 
         # Set constraints on the control rate of change
-        self.ocp.constraints.lbu = np.array([-vbs_dot,-lcg_dot])
-        self.ocp.constraints.ubu = np.array([ vbs_dot, lcg_dot])
-        self.ocp.constraints.idxbu = np.arange(2)
+        self.ocp.constraints.lbu = np.array([-vbs_dot,-lcg_dot, -tv_dot, -tv_dot])
+        self.ocp.constraints.ubu = np.array([ vbs_dot, lcg_dot, tv_dot, tv_dot])
+        self.ocp.constraints.idxbu = np.arange(4)
 
         # --- position bounds (NED: z positive down) ---
         # Tank limits in meters
