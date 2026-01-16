@@ -18,14 +18,14 @@ from smarc_modelling.lib import *
 from smarc_modelling.vehicles.SAM_casadi import SAM_casadi
 
 
-def main(trajectory, Q, N_hor, T_s, map_instance):       ##CHANGE: input trajectory
+def join_trees_optimization(trajectory,N_hor, T_s, build):       ##CHANGE: input trajectory
     # Extract the CasADi model
-    sam = SAM_casadi()
+    sam = SAM_casadi(dt=0.1)
 
     # create ocp object to formulate the OCP
     Ts = T_s            # Sampling time ##CHANGE: from 0.2
     N_horizon = N_hor     # Prediction horizon
-    build = True
+    # build = False
     nmpc = NMPC(sam, Ts, N_horizon, update_solver_settings=build)
     # nmpc = NMPC_trajectory(sam, Ts, N_horizon, Q)   ## CHANGE
     nx = nmpc.nx        # State vector length + control vector
