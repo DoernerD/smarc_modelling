@@ -5,6 +5,7 @@ import smarc_modelling.motion_planning.MotionPrimitives.GlobalVariables as glbv
 import sys
 sys.path.append('~/Desktop/smarc_modelling-master')
 from smarc_modelling.vehicles.SAM import SAM
+# from smarc_modelling.vehicles.SAM_casadi_cy import SAM_casadi
 from smarc_modelling.vehicles.SAM_casadi import SAM_casadi
 from mpl_toolkits.mplot3d import Axes3D
 from smarc_modelling.motion_planning.MotionPrimitives.ObstacleChecker import *
@@ -138,7 +139,9 @@ class SAM_PRIMITIVES():
             current_cg = (data[0,i+1], data[1,i+1], data[2,i+1])
 
             # If outside the map, reject the primitive
-            if  IsOutsideTheMap(pointB[0], pointB[1], pointB[2], map_instance) or IsOutsideTheMap(pointA[0], pointA[1], pointA[2], map_instance):
+            if  IsOutsideTheMap(pointB[0], pointB[1], pointB[2], map_instance): 
+                return [], -1, True, False, None
+            if IsOutsideTheMap(pointA[0], pointA[1], pointA[2], map_instance):
                 return [], -1, True, False, None
 
             # If arrived at the goal
