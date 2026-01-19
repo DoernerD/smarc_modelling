@@ -49,7 +49,7 @@ class NMPC:
         R_diag[1] = 1e-1        # LCG
         R_diag[2] = 1e2
         R_diag[3] = 1e3
-        R_diag[4: ] = 1e-5
+        R_diag[4: ] = 1e-6
         R = np.diag(R_diag)*1e-3
 
         # Stage costs
