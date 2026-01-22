@@ -27,16 +27,16 @@ class NMPC:
         # --------------------------- Cost setup ---------------------------------
         # State weight matrix
         Q_diag = np.ones(self.nx)
-        Q_diag[ 0 ] = 500     # Position:         standard 10
+        Q_diag[ 0 ] = 1000     # Position:         standard 10
         Q_diag[ 1 ] = 10     # Position:         standard 10
-        Q_diag[ 2 ] = 100       # z-Position:         standard 10
+        Q_diag[ 2 ] = 500       # z-Position:         standard 10
         Q_diag[ 3:7 ] = 1       # Quaternion:       standard 10
         Q_diag[ 7:10] = 1       # linear velocity:  standard 1
         Q_diag[10:13] = 1       # Angular velocity: standard 1
 
         # Control weight matrix - Costs set according to Bryson's rule
         Q_diag[13] = 1e-5            # VBS:      Standard: 1e-4
-        Q_diag[14] = 1e-5            # LCG:      Standard: 1e-4
+        Q_diag[14] = 1e-4            # LCG:      Standard: 1e-4
         Q_diag[15] = 5e2             # stern_angle:   Standard: 100
         Q_diag[16] = 1e2             # rudder_angle:  Standard: 100
         Q_diag[17:] = 1e-3            # RPM1 And RPM2: Standard: 1e-6
@@ -82,7 +82,7 @@ class NMPC:
         # --- position bounds (NED: z positive down) ---
         # Tank limits in meters
         x_min, x_max = 0.0, 8.0
-        y_min, y_max = -1.5, 1.5
+        y_min, y_max = -2.0, 2.0
         z_min, z_max = -0.5, 3.0   
 
         pos_lbx = np.array([x_min, y_min, z_min])
