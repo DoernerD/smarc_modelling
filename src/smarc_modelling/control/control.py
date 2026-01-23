@@ -47,8 +47,8 @@ class NMPC:
         R_diag = np.ones(self.nu)
         R_diag[0] = 1e-1        # VBS
         R_diag[1] = 1e-1        # LCG
-        R_diag[2] = 1e2
-        R_diag[3] = 1e3
+        R_diag[2] = 5e2
+        R_diag[3] = 5e3
         R_diag[4: ] = 1e-6
         R = np.diag(R_diag)*1e-3
 
@@ -70,14 +70,15 @@ class NMPC:
         # --------------------- Constraint Setup --------------------------
         vbs_dot = 200   # Maximum rate of change for the VBS
         lcg_dot = 50    # Maximum rate of change for the LCG
+        tv_dot = 0.1    # Maximum rate of change for the thrust vectoring
 
         # Declare initial state
         self.ocp.constraints.x0 = np.zeros((self.nx,)) # Initial state is zero. This is set in the sim. for-loop
 
         # Set constraints on the control rate of change
-        self.ocp.constraints.lbu = np.array([-vbs_dot,-lcg_dot])
-        self.ocp.constraints.ubu = np.array([ vbs_dot, lcg_dot])
-        self.ocp.constraints.idxbu = np.arange(2)
+        self.ocp.constraints.lbu = np.array([-vbs_dot,-lcg_dot, -tv_dot, -tv_dot])
+        self.ocp.constraints.ubu = np.array([ vbs_dot, lcg_dot, tv_dot, tv_dot])
+        self.ocp.constraints.idxbu = np.arange(4)
 
         # --- position bounds (NED: z positive down) ---
         # Tank limits in meters
