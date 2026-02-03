@@ -11,6 +11,8 @@ from scipy.spatial import KDTree
 import time
 import multiprocessing
 import csv
+# from sklearn import tree
+from sklearn import tree
 from smarc_modelling.motion_planning.MotionPrimitives.MotionPrimitives import SAM_PRIMITIVES
 from smarc_modelling.motion_planning.MotionPrimitives.ObstacleChecker import calculate_angle_betweenVectors, calculate_angle_goalVector, compute_A_point_forward
 from smarc_modelling.motion_planning.MotionPrimitives.OptimizationAcados_doubleTree import optimization_acados_doubleTree
@@ -19,6 +21,10 @@ from smarc_modelling.motion_planning.MotionPrimitives.Optimizer.acados_trajector
 from smarc_modelling.motion_planning.MotionPrimitives.trm_colors import *
 import smarc_modelling.motion_planning.MotionPrimitives.GlobalVariables as glbv
 import matplotlib.pyplot as plt
+
+from geometry_msgs.msg import PoseStamped, Point
+from visualization_msgs.msg import Marker, MarkerArray
+from builtin_interfaces.msg import Duration
 
 # Global variables
 lock = Lock()
@@ -171,6 +177,7 @@ def process_input_pair(inputs, current_state, map_instance, numberTree):
 
     # Orientation 
     alpha = calculate_angle_goalVector(current_state, v_vector, map_instance, numberTree)
+    #### Nacho: what is this alpha?
 
     # Get all the points within one single input primitive
     data, cost, inObs, arrived, finalState = sim.curvePrimitives(current_state, inputs[0 : inputLen//2], inputs[inputLen//2 : inputLen], map_instance, alpha, numberTree)
@@ -205,9 +212,12 @@ def compute_current_orientationVector(state, map_inst, numberTree, type = "norma
     backward_vector /= backward_vector_norm
 
     angle = calculate_angle_goalVector(state, forward_vector, map_inst, numberTree, type)
+    # Nacho
     if angle < np.pi/2:
+        # orientation_vector = body_forward
         orientation_vector = forward_vector
     else:
+        # orientation_vector = body_backward
         orientation_vector = backward_vector
 
     return orientation_vector
@@ -261,7 +271,7 @@ def get_neighbors(current, map_instance, full_input_pairs, numberTree):
           for inputs in full_input_pairs
     ) 
     end_t = time.time()
-    print(f"Time to generate all primitives: {end_t - t:.4f} seconds") 
+    # print(f"Time to generate all primitives: {end_t - t:.4f} seconds") 
 
     # Save the generated primitives
     reached_states = []
@@ -312,7 +322,6 @@ def calculate_f(neighbor, map_instance, tentative_g, heuristic_cost, dec, typeF,
     3) With heading error
         f = g_normalized + h_normalized + w * heading_error_normalized
     """
-
     match typeF:
         case 1:
             '''# 1 # Normal A star'''
@@ -321,39 +330,30 @@ def calculate_f(neighbor, map_instance, tentative_g, heuristic_cost, dec, typeF,
 
         case 2:
             '''# 2 # Adaptive A star'''
-
             total_f = (tentative_g**2 + heuristic_cost**2) / tentative_g
 
         case 3:
             '''# 3 # Using the heading A star'''
 
-            # Define current and goal positions
-            x = neighbor[0]
-            y = neighbor[1]
-            z = neighbor[2]
-            if numberTree == 1:
-                x_goal = map_instance["goal_pixel"][0]
-                y_goal = map_instance["goal_pixel"][1]
-                z_goal = map_instance["goal_pixel"][2]
-            else:
-                x_goal = map_instance["start_pos"][0]
-                y_goal = map_instance["start_pos"][1]
-                z_goal = map_instance["start_pos"][2]
-
-            # Define the distance between position and goal
-            dx = x_goal - x
-            dy = y_goal - y
-            dz = z_goal - z
-
             # Define current linear velocity vector
+
+            # Nacho: original
             q0, q1, q2, q3 = neighbor[3:7]
             vx, vy, vz = body_to_global_velocity((q0, q1, q2, q3), neighbor[7:10])
+            
+            # Alternative that works well
+            # if numberTree == 1:
+            #     d = -1**2 / (-2*dec)
+            #     vx, vy, vz = body_to_global_velocity((q0, q1, q2, q3), neighbor[7:10])
+            # else:
+            #     vx, vy, vz = neighbor[7:10]
+            #     d = 1
+
+            # Current
+            # vx, vy, vz = neighbor[7:10]
+            
             v_vector = np.array([vx, vy, vz])
 
-            # Define the goal vector
-            goal_vector = np.array([dx, dy, dz])
-            goal_vector_norm = np.linalg.norm(goal_vector)
-            
             # Compute the best orientation vector and normalize it
             orientation_vector = compute_current_orientationVector(neighbor, map_instance, numberTree)
             orientation_vector_norm = np.linalg.norm(orientation_vector)
@@ -366,15 +366,24 @@ def calculate_f(neighbor, map_instance, tentative_g, heuristic_cost, dec, typeF,
 
             # Compute d and c distances
             maxAngle = np.deg2rad(7)
-            if angle_between_vectors > maxAngle:
-                angleBrake = angle_between_vectors - maxAngle
-                d = -1**2 / (-2*dec)
-                c = np.sqrt(goal_vector_norm**2 + d**2 - 2*goal_vector_norm*d*np.cos(angleBrake))
-                heuristic = c + d
-            else:
-                heuristic = goal_vector_norm
+            # if angle_between_vectors > maxAngle:
+            angleBrake = angle_between_vectors - maxAngle
+            d = 1
+            # d = -1**2 / (-2*dec)
+            c = np.sqrt(heuristic_cost**2 + d**2 - 2*heuristic_cost*d*np.cos(angleBrake))
+            # c = np.sqrt(heuristic_cost**2 - 2*heuristic_cost*d*np.cos(angleBrake))
+            heuristic = c + d
+            # else:
+            #     heuristic = heuristic_cost
 
-            total_f = (tentative_g**2 + heuristic**2) / tentative_g
+            cost_weight = 0.2
+            if numberTree == 1:
+                # total_f = (tentative_g**2 + heuristic**2) / tentative_g
+                total_f = cost_weight*tentative_g + heuristic
+            else:
+                # total_f = (tentative_g**2 + heuristic**2) / tentative_g
+                # This kind of works
+                total_f = cost_weight*tentative_g + heuristic
 
         case _:
             print("Non valid cost function f...")
@@ -438,7 +447,8 @@ def find_tree_intersection(g_cost_tree1, g_cost_tree2, list_connection_states, m
                 list_connection_states.append((node1.state, node2.state))
 
     moreThanMinimum = False
-    if len(list_connection_states) > 1000:
+    # Nacho: this should be a parameter. And an important one!
+    if len(list_connection_states) > 10:
         moreThanMinimum = True
     
     return (list_connection_states, moreThanMinimum)
@@ -466,7 +476,7 @@ def findBestConnectionNodes(list_states):
     connection_list = [best_state1]
     connection_list.append(best_state2)
     
-    return connection_list
+    return connection_list, list_states
 
 def compute_current_pitch(state):
 
@@ -507,12 +517,12 @@ def define_primitives_set():
     --> If I want to change only the RPM to 500, I will write: full_input_pairs = np.array([[500, 4]])
     '''
 
-    # 1 # Define the inputs 
+    1 # Define the inputs 
     rudder_inputs = np.linspace(-max_input, max_input, step_input)
     stern_inputs = np.linspace(-max_input, max_input, step_input)
     vbs_inputs = np.linspace(0, 100, 3)
     lcg_inputs = np.linspace(0, 100, 3)
-    rpm_inputs = np.linspace(-400, 400, 5)
+    rpm_inputs = np.linspace(-500, 500, 3)
 
     # 2 # Add the name of the input into np.meshgrid(), and change the second value of .reshape(., THIS)
     input_pairs = np.array(np.meshgrid(rudder_inputs, rpm_inputs, vbs_inputs, lcg_inputs, stern_inputs)).T.reshape(-1,5)
@@ -534,28 +544,33 @@ def double_a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, de
     This function returns (trajectory, successfulZeroOrOne, totalCost)
     """
 
+    ## Nacho:
+    # 1) Add more checks to remove wrong primites
+    # 2) Figure why the end orientation cannot be used at the moment
+    # 3) Check cost function with heading error when backing up 
+
     # Initialise general variables (valid for both trees)
     random.seed()
     full_input_pairs = define_primitives_set()
 
     dt_resolution = glbv.RESOLUTION_DT
     flag = 0    # for number of iterations
-    nMaxIterations = 300
-    maxTime = 300 #300   # seconds
+    nMaxIterations = 1000
+    maxTime = 60 #300   # seconds
 
     # OCP settings
     update_solver_settings = True
 
     # First tree variables
-    x0 = map_instance["initial_state"]
-    start = Node(x0)
-    open_set = []                   # (cost_node, Node)
-    parents_dictionary = {}         # (Node_current: Node_parent)
-    g_cost = {start: 0}             # keeps track of the costs of the nodes, useful to understand more convenient paths
-    resolution_dictionary = {}
-    heapq.heappush(open_set, (0, start))
-    parents_dictionary[start] = None
-    arrivedPoint = False
+    x0_firstTree = map_instance["initial_state"]
+    start_firstTree = Node(x0_firstTree)
+    open_set_firstTree = []                   # (cost_node, Node)
+    parents_dictionary_firstTree = {}         # (Node_current: Node_parent)
+    g_cost_firstTree = {start_firstTree: 0}             # keeps track of the costs of the nodes, useful to understand more convenient paths
+    resolution_dictionary_firstTree = {}
+    heapq.heappush(open_set_firstTree, (0, start_firstTree))
+    parents_dictionary_firstTree[start_firstTree] = None
+    arrivedPoint_firstTree = False
 
     # Second tree variables
     x0_secondTree = map_instance["final_state"] 
@@ -568,6 +583,9 @@ def double_a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, de
     parents_dictionary_secondTree[start_secondTree] = None
     arrivedPoint_secondTree = False
     
+    # For rviz visualization
+    tree = []
+    branch_cnt = 0
 
     # Start the search
     list_connection_states = []  #[(node1, node2), ...]
@@ -575,20 +593,22 @@ def double_a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, de
     current_algorithm_time = algorithm_start_time
     print(f"{bcolors.HEADER}>> Starting trajectory search{bcolors.ENDC}")
     while (current_algorithm_time - algorithm_start_time < maxTime):   ###Change this in the future
-        # Are there intersections?
         if flag > 0:
             status = 1
-
-            list_connection_states, moreThanMinimum = find_tree_intersection(g_cost, g_cost_secondTree, list_connection_states, 2, 50)
-            if arrivedPoint and arrivedPoint_secondTree and not moreThanMinimum:
-                
+            
+            # Check for trees intersections while growing them
+            list_connection_states, moreThanMinimum = find_tree_intersection(g_cost_firstTree, g_cost_secondTree, 
+                                                                             list_connection_states, 1, 20)
+            # If both trees have arrived to their goals but not enough intersection points, increase search until moreThanMinimum = True
+            if arrivedPoint_firstTree and arrivedPoint_secondTree and not moreThanMinimum:
                 distance = 0
                 while not moreThanMinimum and distance <= 11:
                     distance += 1
                     angle = 0
-                    while angle <= 150 and not moreThanMinimum:
+                    while angle <= 50 and not moreThanMinimum:
                         angle += 10
-                        list_connection_states, moreThanMinimum = find_tree_intersection(g_cost, g_cost_secondTree, list_connection_states, distance, angle)      
+                        list_connection_states, moreThanMinimum = find_tree_intersection(g_cost_firstTree, g_cost_secondTree, 
+                                                                                         list_connection_states, distance, angle)      
                 moreThanMinimum = True
 
             currentNumOptimization = 0
@@ -596,22 +616,23 @@ def double_a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, de
                 print(f"{bcolors.OKBLUE}Double Astar is starting connecting the trees{bcolors.ENDC}")
                 while(status!=0):
 
+                    # This isn't needed
                     maxNumOptimizations = 10  
                     if currentNumOptimization > maxNumOptimizations:
                         print(f"{bcolors.FAIL}EXCEEDED MAX NUMBER OF OPTIMIZATIONS! - exit {bcolors.ENDC}")
-                        return list_connection_states, 0, "maxNumberOptimizations"
+                        return list_connection_states, 0, "maxNumberOptimizations", tree
                     
                     if len(list_connection_states) == 0:
                         print(f"{bcolors.FAIL}IMPOSSIBLE TO CONNECT THE TREES! - exit {bcolors.ENDC}")
-                        return list_connection_states, 0, "NoPointsToConnect"
+                        return list_connection_states, 0, "NoPointsToConnect", tree
 
                     currentNumOptimization += 1
-                    list_connection = findBestConnectionNodes(list_connection_states)  
+                    list_connection, list_connection_states = findBestConnectionNodes(list_connection_states)  
 
                     # Reconstruct the second path and invert v, w, rpm
                     first_path = reconstruct_path_doubleTree(Node(list_connection[0]), 
-                                                             parents_dictionary,
-                                                             resolution_dictionary, 
+                                                             parents_dictionary_firstTree,
+                                                             resolution_dictionary_firstTree, 
                                                              map_instance, ax, plt)
                     second_path = reconstruct_path_doubleTree(Node(list_connection[-1]), 
                                                               parents_dictionary_secondTree, 
@@ -619,15 +640,16 @@ def double_a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, de
                                                               map_instance, ax, plt)
 
                     # Add last states for robustness
+                    # Nacho: check if this is needed
                     for _ in range(50):
                         second_path.insert(0, second_path[0])
                     
+                    ### Nacho: shouldn't we invert the vbs and lcg commands as well?
                     waypoints = []
                     for waypoint in second_path:
                         reverted_waypoint = waypoint.copy()
-                        reverted_waypoint[7:10] = -reverted_waypoint[7:10]
-                        reverted_waypoint[17:] = -reverted_waypoint[17:]
-                        reverted_waypoint[10:13] = -reverted_waypoint[10:13]
+                        reverted_waypoint[7:13] = -reverted_waypoint[7:13]  # Invert velocities
+                        reverted_waypoint[17:] = -reverted_waypoint[17:]   # Invert rpm 
                         waypoints.append(reverted_waypoint)               
 
                     # # Optimize the second path
@@ -637,12 +659,14 @@ def double_a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, de
                     N_hor = 30
                     T_s = 0.1
                     optimized_waypoints, status = join_trees_optimization(array_waypoints, N_hor, T_s, False)
+                    # optimized_waypoints = array_waypoints
+
                     if status != 0:
                         print(f"{bcolors.FAIL}Optimization failed - change connection points{bcolors.ENDC}")
                         continue
                     # print("real first second path: ", connection_list_optimized[-1])
                     # print("--------")
-                    print("After MPC first second path: ", optimized_waypoints[0])
+                    # print("After MPC first second path: ", optimized_waypoints[0])
 
                     # Create the entire path
                     full_path_waypoints = []
@@ -652,161 +676,93 @@ def double_a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, de
                     for ii in np.arange(1, len(optimized_waypoints)):
                         full_path_waypoints.append(optimized_waypoints[ii])
 
-
                     #optimized_waypoints = [connection_list[0]] + optimized_waypoints
-                    return full_path_waypoints, 1, "success"
+                    return full_path_waypoints, 1, "success", tree
                 
                 # Optimization failed
                 print(f"{bcolors.FAIL}all the optimizations failed - exit{bcolors.ENDC}")
-                return [], 0, "allOptimizationsFailed"
+                return [], 0, "allOptimizationsFailed", tree
         
-        # Print the iteration number
-        flag = flag + 1
-        print(f"iteration {flag:.0f}")
-        #print(f"arrived Point{flag:.0f}")
-
-        if arrivedPoint:
-            print(f"{bcolors.OKCYAN}first arrived{bcolors.ENDC}")
-        if arrivedPoint_secondTree:
-            print(f"{bcolors.OKCYAN}second arrived{bcolors.ENDC}")
-
-        # Get the current node for the first tree (the one with cheapest f_cost in open_set)
-        if not arrivedPoint:
+        if flag > nMaxIterations:
+            print(f"Exceeded maximum number of iterations: {nMaxIterations}")
+            break
+        
+        # Grow first tree
+        if not arrivedPoint_firstTree:
             try:
-                _, current_node = heapq.heappop(open_set)   #removes and returns the node with lowest f value
-                current_g = g_cost[current_node]
+                open_set_firstTree, g_cost_firstTree, parents_dictionary_firstTree, resolution_dictionary_firstTree, neighbor_arrived_firstTree, tree, branch_cnt = expand_tree_step(
+                    open_set_firstTree, g_cost_firstTree, parents_dictionary_firstTree, resolution_dictionary_firstTree, map_instance, full_input_pairs, dt_resolution, dec, typeF_function, tree, branch_cnt, numberTree=1)
             except IndexError:
                 print(f"{bcolors.FAIL}No more nodes to expand in first tree! Exiting...{bcolors.ENDC}")
-                return [], 0, "noMoreNodesFirstTree"
+                return [], 0, "noMoreNodesFirstTree", tree
+        if neighbor_arrived_firstTree:
+            arrivedPoint_firstTree = True
 
-        # Get the current node for the second tree (the one with cheapest f_cost in open_set)
+        # Grow second tree
         if not arrivedPoint_secondTree:
             try:
-                _, current_node_secondTree = heapq.heappop(open_set_secondTree)   #removes and returns the node with lowest f value
-                current_g_secondTree = g_cost_secondTree[current_node_secondTree]
+                open_set_secondTree, g_cost_secondTree, parents_dictionary_secondTree, resolution_dictionary_secondTree, neighbor_arrived_secondTree, tree, branch_cnt = expand_tree_step(
+                    open_set_secondTree, g_cost_secondTree, parents_dictionary_secondTree, resolution_dictionary_secondTree, map_instance, full_input_pairs, dt_resolution, dec, typeF_function, tree, branch_cnt, numberTree=2)
             except IndexError:
                 print(f"{bcolors.FAIL}No more nodes to expand in second tree! Exiting...{bcolors.ENDC}")
-                return [], 0, "noMoreNodesSecondTree"
-
-        # Find new neighbors (last point of the primitives) using the motion primitives
-        if not arrivedPoint:
-            reached_states, last_states, neighbor_arrived, final = get_neighbors(current_node, map_instance, full_input_pairs, 1)
-            finalLast = final[0] # in case we arrived
-            finalCost = final[1] # in case we arrived 
-
-        # Find new neighbors for second tree (last point of the primitives) using the motion primitives
-        if not arrivedPoint_secondTree:
-            reached_states_secondTree, last_states_secondTree, neighbor_arrived_secondTree, final_secondTree = get_neighbors(current_node_secondTree, map_instance, full_input_pairs, 2)
-            finalLast_secondTree = final_secondTree[0] # in case we arrived
-            finalCost_secondTree = final_secondTree[1] # in case we arrived 
-
-        # If all the generated primitives are not in the free space, then continue with the next vertex
-        #if len(reached_states) == 0: 
-        #    continue
-        
-        # Analyze the single steps within the primitives (each dt) for first tree
-        if not arrivedPoint:
-            if len(reached_states) != 0:
-                for sequence_states in reached_states:
-
-                    # Save specific points for resolution of the trajectory
-                    list_vertices = getResolution(sequence_states, dt_resolution)
-                    resolution_dictionary[Node(sequence_states[:,-1])] = list_vertices
-
-                    # Plot the found motion primitives
-                    if realTimeDraw:
-                        x_vals = sequence_states[0, :]
-                        y_vals = sequence_states[1, :]
-                        z_vals = sequence_states[2, :]
-                        ax.plot(x_vals, y_vals, z_vals, 'c+', linewidth=0.5)
-
-                if realTimeDraw:
-                    plt.draw()
-                    plt.pause(0.01)
-
-                # Save the new valid primitives
-                for neighbor, cost_path in last_states:
-                    
-                    # Calculate tentative g score
-                    tentative_g_cost = current_g + cost_path
-                    
-                    # Update the hierarchy
-                    if Node(neighbor) not in g_cost or tentative_g_cost < g_cost[Node(neighbor)]:
-
-                        # Save g cost in the g_cost dictionary
-                        g_cost[Node(neighbor)] = tentative_g_cost              
-                        
-                        # Compute the f_cost
-                        f_cost = calculate_f(neighbor, map_instance, tentative_g_cost,  
-                                             heuristic(neighbor, (map_instance["goal_pixel"][0], 
-                                                                  map_instance["goal_pixel"][1], 
-                                                                  map_instance["goal_pixel"][2])), 
-                                                                  dec, typeF_function, 1)
-
-                        # Add node dependency on current node
-                        parents_dictionary[Node(neighbor)] = (current_node)   
-
-                        # Save the last node of the primitive along its f_cost
-                        heapq.heappush(open_set, (f_cost, Node(neighbor)))   
-
-        # Analyze the single steps within the primitives (each dt) for second tree
-        if not arrivedPoint_secondTree:
-            if len(reached_states_secondTree) != 0:
-                for sequence_states_secondTree in reached_states_secondTree:
-
-                    # Save specific points for resolution of the trajectory
-                    list_vertices_secondTree = getResolution(sequence_states_secondTree, dt_resolution)
-                    resolution_dictionary_secondTree[Node(sequence_states_secondTree[:,-1])] = list_vertices_secondTree
-
-                    # Plot the found motion primitives
-                    if realTimeDraw:
-                        x_vals_secondTree = sequence_states_secondTree[0, :]
-                        y_vals_secondTree = sequence_states_secondTree[1, :]
-                        z_vals_secondTree = sequence_states_secondTree[2, :]
-                        ax.plot(x_vals_secondTree, y_vals_secondTree, z_vals_secondTree, 'r+', linewidth=0.5)
-
-                if realTimeDraw:
-                    plt.draw()
-                    plt.pause(0.01)
-
-                # Save the new valid primitives
-                for neighbor_secondTree, cost_path_secondTree in last_states_secondTree:
-                    
-                    # Calculate tentative g score
-                    tentative_g_cost_secondTree = current_g_secondTree + cost_path_secondTree
-                    
-                    # Update the hierarchy
-                    if Node(neighbor_secondTree) not in g_cost_secondTree or tentative_g_cost_secondTree < g_cost_secondTree[Node(neighbor_secondTree)]:
-
-                        # Save g cost in the g_cost dictionary
-                        g_cost_secondTree[Node(neighbor_secondTree)] = tentative_g_cost_secondTree              
-                        
-                        # Compute the f_cost
-                        f_cost_secondTree = calculate_f(neighbor_secondTree, map_instance, tentative_g_cost_secondTree,  
-                                                        heuristic(neighbor_secondTree, 
-                                                                  (map_instance["start_pos"][0], 
-                                                                   map_instance["start_pos"][1], 
-                                                                   map_instance["start_pos"][2])), dec, typeF_function, 2) 
-
-                        # Add node dependency on current node
-                        parents_dictionary_secondTree[Node(neighbor_secondTree)] = (current_node_secondTree)   
-
-                        # Save the last node of the primitive along its f_cost
-                        heapq.heappush(open_set_secondTree, (f_cost_secondTree, Node(neighbor_secondTree)))   
-
-        # If a neighbor arrived to goal, avoid computing its neighbour (do not continue growing that tree!)
-        if neighbor_arrived:
-            arrivedPoint = True
+                return [], 0, "noMoreNodesSecondTree", tree 
         if neighbor_arrived_secondTree:
             arrivedPoint_secondTree = True
 
         # Update the timer
         current_algorithm_time = time.time()
+        # Print the iteration number
+        flag = flag + 1
+        print(f"iteration {flag:.0f}")
 
     # If we arrived here, no solution was found
     print("No solution found!")
+    return [], 0, "maxIterations", tree # No path found 
 
-    return [], 0, "maxIterations" # No path found 
+
+def expand_tree_step(open_set_tree, g_cost_tree, parents_dictionary_tree, resolution_dictionary_tree, map_instance, full_input_pairs, dt_resolution, dec, typeF_function, tree, branch_cnt, numberTree=0):
+
+    _, current_node_tree = heapq.heappop(open_set_tree)   #removes and returns the node with lowest f value
+    current_g_tree = g_cost_tree[current_node_tree]
+    # Find new neighbors for tree (last point of the primitives) using the motion primitives
+    reached_states_tree, last_states_tree, neighbor_arrived_tree, final_tree = get_neighbors(
+        current_node_tree, map_instance, full_input_pairs, numberTree)
+    
+    if len(reached_states_tree) != 0:
+        for sequence_states_tree in reached_states_tree:
+            # Save specific points for resolution of the trajectory
+            list_vertices_tree = getResolution(sequence_states_tree, dt_resolution)
+            resolution_dictionary_tree[Node(sequence_states_tree[:,-1])] = list_vertices_tree
+
+        # Save the new valid primitives
+        for neighbor_tree, cost_path_tree in last_states_tree:
+            add_branch(tree, numberTree, branch_cnt, current_node_tree.state, neighbor_tree)
+            branch_cnt += 1
+            
+            # Calculate tentative g score
+            tentative_g_cost_tree = current_g_tree + cost_path_tree
+            
+            # Update the hierarchy
+            if Node(neighbor_tree) not in g_cost_tree or tentative_g_cost_tree < g_cost_tree[Node(neighbor_tree)]:
+
+                # Save g cost in the g_cost dictionary
+                g_cost_tree[Node(neighbor_tree)] = tentative_g_cost_tree              
+
+                # Compute the f_cost
+                if numberTree == 2:
+                    pose = map_instance["start_pos"]
+                else:
+                    pose = map_instance["goal_pixel"]
+                f_cost_tree = calculate_f(neighbor_tree, map_instance, tentative_g_cost_tree,  
+                                                heuristic(neighbor_tree, (pose[0], pose[1], pose[2])), dec, typeF_function, numberTree) 
+                # Add node dependency on current node
+                parents_dictionary_tree[Node(neighbor_tree)] = (current_node_tree)   
+
+                # Save the last node of the primitive along its f_cost
+                heapq.heappush(open_set_tree, (f_cost_tree, Node(neighbor_tree)))   
+    
+    return open_set_tree, g_cost_tree, parents_dictionary_tree, resolution_dictionary_tree, neighbor_arrived_tree, tree, branch_cnt
+
 
 def a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, dec):
     """
@@ -819,11 +775,13 @@ def a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, dec):
 
     # Initialise general variables (valid for both trees)
     random.seed()
+    full_input_pairs = define_primitives_set()
+
     # sim = SAM_PRIMITIVES()
     dt_resolution = glbv.RESOLUTION_DT
     flag = 0    # for number of iterations
-    nMaxIterations = 300
-    maxTime = 300 # seconds
+    nMaxIterations = 50
+    maxTime = 100 # seconds
 
     # First tree variables
     x0 = map_instance["initial_state"]
@@ -836,6 +794,8 @@ def a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, dec):
     parents_dictionary[start] = None
     arrivedPoint = False
 
+    tree = []
+    print(f"{bcolors.WARNING}single tree search starting{bcolors.ENDC}")
     # Start the search
     algorithm_start_time = time.time()
     algorithm_current_time = algorithm_start_time
@@ -848,7 +808,7 @@ def a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, dec):
             path, successfulSearch = reconstruct_path(Node(finalLast), parents_dictionary, resolution_dictionary, map_instance, ax, plt)
 
             if successfulSearch:
-                return path, successfulSearch, "success"
+                return path, successfulSearch, "success", tree
         
         # Print the iteration number
         flag = flag + 1
@@ -863,9 +823,10 @@ def a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, dec):
             break
 
         # Find new neighbors (last point of the primitives) using the motion primitives
-        reached_states, last_states, arrivedPoint, final = get_neighbors(current_node, map_instance, 1)
+        reached_states, last_states, arrivedPoint, final = get_neighbors(current_node, full_input_pairs, map_instance, 1)
         finalLast = final[0] # in case we arrived
         finalCost = final[1] # in case we arrived 
+        print(f"Neighbors found")
 
         #If all the generated primitives are not in the free space, then continue with the next vertex
         if len(reached_states) == 0: 
@@ -873,6 +834,7 @@ def a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, dec):
         
         # Analyze the single steps within the primitives (each dt) for first tree
         for sequence_states in reached_states:
+            add_branch(tree, current_node.state, sequence_states[:,-1])
 
             # Save specific points for resolution of the trajectory
             list_vertices = getResolution(sequence_states, dt_resolution)
@@ -888,6 +850,7 @@ def a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, dec):
         if realTimeDraw:
             plt.draw()
             plt.pause(0.01)
+        print(f"Branches added")
 
         # Save the new valid primitives
         for neighbor, cost_path in last_states:
@@ -912,12 +875,43 @@ def a_star_search(ax, plt, map_instance, realTimeDraw, typeF_function, dec):
         
         # Update the current time
         algorithm_current_time = time.time()
+        print(f"First iteration finished")
+
         
     # If we arrived here, no solution was found
     print("No solution found!")
 
-    return [], 0, "maxIterations" # No path found 
+    return [], 0, "maxIterations", tree # No path found 
 
+def add_branch(tree, subtree, branch_cnt, k, v):
+    marker = Marker()
+    def add_point(p):
+        pt = Point()
+        pt.x = p[0]
+        pt.y = p[1]
+        pt.z = p[2]
+        marker.points.append(pt)
+    t = time.time()
+    marker.header.frame_id = "mocap"
+    marker.header.stamp.sec = int(t)
+    marker.header.stamp.nanosec = int((t - int(t)) * 1e9)
+    marker.id = branch_cnt
+    marker.type = Marker.LINE_LIST
+    if subtree == 1:
+        marker.color.r = 1.
+        marker.color.g = 0.
+        marker.color.b = 0.
+    else:
+        marker.color.r = 0. 
+        marker.color.g = 0.
+        marker.color.b = 1.
+    marker.color.a = 0.5
+    marker.scale.x = 0.01 
+    marker.lifetime = Duration(sec=0, nanosec=0)
+    add_point(k)
+    add_point(v)
+    tree.append(marker)
+    return tree
 
 # Possible results for "failingNotes":
 # "success", "allOptimizationsFailed", "maxIterations", "NoPointsToConnect", "maxNumberOptimizations"

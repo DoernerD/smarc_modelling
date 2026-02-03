@@ -164,10 +164,10 @@ def MotionPlanningROS(start_state, goal_state, map_boundaries, map_resolution):
     start_time = time.time()
     if complexity == 0:
         print(f"{bcolors.WARNING}single tree search{bcolors.ENDC}")
-        trajectory, succesfulSearch, debguMsg = a_star_search(None, None, map_instance, False, typeFunction, dec)
+        trajectory, succesfulSearch, debguMsg, tree = a_star_search(None, None, map_instance, False, typeFunction, dec)
     else:
         print(f"{bcolors.WARNING}double tree search{bcolors.ENDC}")
-        trajectory, succesfulSearch, debugMsg = double_a_star_search(None, None, map_instance, False, typeFunction, dec)
+        trajectory, succesfulSearch, debugMsg, tree = double_a_star_search(None, None, map_instance, False, typeFunction, dec)
     print(f"{bcolors.OKGREEN}[ OK ]{bcolors.ENDC}")
     end_time = time.time()
 
@@ -176,14 +176,14 @@ def MotionPlanningROS(start_state, goal_state, map_boundaries, map_resolution):
     # print(f"total time for Astar:...{end_time-start_time:.4f} seconds")
     
     # Save the trajectory into saved_trajectory.csv file
-    print(f"{bcolors.HEADER}>> Save the trajectory >> saved_trajectory.csv{bcolors.ENDC}")
-    df = pd.DataFrame(trajectory, columns=["x", "y", "z", "q0", "q1", "q2", "q3", "u", "v", "w", "q", "p", "r", "V_bs", "l_cg", "ds", "dr", "rpm_1", "rpm_2"])
-    df.to_csv("saved_trajectory.csv", index=False)
-    print(f"{bcolors.OKGREEN}[ OK ]{bcolors.ENDC}")
+    if succesfulSearch:
+        print(f"{bcolors.HEADER}>> Save the trajectory >> saved_trajectory.csv{bcolors.ENDC}")
+        df = pd.DataFrame(trajectory, columns=["x", "y", "z", "q0", "q1", "q2", "q3", "u", "v", "w", "q", "p", "r", "V_bs", "l_cg", "ds", "dr", "rpm_1", "rpm_2"])
+        df.to_csv("saved_trajectory.csv", index=False)
     
     print(f"{bcolors.OKGREEN}THE END{bcolors.ENDC}")
 
-    return (trajectory, succesfulSearch, debugMsg)
+    return (trajectory, succesfulSearch, debugMsg, tree)
 
 '''
 if __name__ == "__main__":

@@ -138,6 +138,7 @@ class SAM_PRIMITIVES():
             pointB = compute_B_point_backward(data[:, i+1])
             current_cg = (data[0,i+1], data[1,i+1], data[2,i+1])
 
+            ## Nacho: removed for degbugging
             # If outside the map, reject the primitive
             if  IsOutsideTheMap(pointB[0], pointB[1], pointB[2], map_instance): 
                 return [], -1, True, False, None
@@ -148,6 +149,10 @@ class SAM_PRIMITIVES():
             if not arrivedPointBefore and (arrived(current_cg, map_instance, numberTree) or arrived(pointA, map_instance, numberTree) or arrived(pointB, map_instance, numberTree)):
                 arrivedPointBefore = True
                 finalState = data[:, i+1]
+
+        # If distance longer than a threshold, reject the primitive. Most likely the motion model failed
+        if math.hypot(data[0, -1]-data[0, 0], data[1, -1]-data[1, 0], data[2, -1]-data[2, 0]) > 1.:
+            return [], -1, True, False, None
                 
         return data, cost_sum, False, arrivedPointBefore, finalState
 
