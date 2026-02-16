@@ -66,15 +66,20 @@ class SAM_PRIMITIVES():
 
         data = np.empty(len(x)) 
         data[:] = x + np.asarray(self.dynamics_wrapper(x, ds_inputs, indexes) * self.dt).ravel() 
-        cost = self.computeCost(x, data[:])
+        cost = self.computeCost(x, data[:], indexes)
 
         return data, cost
     
-    def computeCost(self, x0, x1):
+    def computeCost(self, x0, x1, indexes):
         """
         This function computes the cost of each single step within one primitive (It will be the g_cost)
         """
-
+        # Penalize thrustvectoring primitives
+        # cost_factor = 10
+        # for ii in range(len(indexes)):
+        #     if int(indexes[ii]) == 2 or int(indexes[ii]) == 3:
+        #         cost_factor = 1.
+            
         # 1-Using the distance from node(k-1) and node(k)
         cost = np.sqrt((x0[0] - x1[0])**2 + (x0[1] - x1[1])**2 + (x0[2] - x1[2])**2)
         
@@ -116,7 +121,8 @@ class SAM_PRIMITIVES():
 
         # Compute the dynamic t_span
         self.t_span = (0, computedSpan)
-        self.n_sim = int(self.t_span[1]/self.dt)
+        # self.n_sim = int(self.t_span[1]/self.dt)
+        self.n_sim = 7
 
         # Initialize the variables
         cost_sum = 0
@@ -151,8 +157,8 @@ class SAM_PRIMITIVES():
                 finalState = data[:, i+1]
 
         # If distance longer than a threshold, reject the primitive. Most likely the motion model failed
-        if math.hypot(data[0, -1]-data[0, 0], data[1, -1]-data[1, 0], data[2, -1]-data[2, 0]) > 1.:
-            return [], -1, True, False, None
+        # if math.hypot(data[0, -1]-data[0, 0], data[1, -1]-data[1, 0], data[2, -1]-data[2, 0]) > 1.:
+        #     return [], -1, True, False, None
                 
         return data, cost_sum, False, arrivedPointBefore, finalState
 

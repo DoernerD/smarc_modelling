@@ -7,6 +7,7 @@ from smarc_modelling.motion_planning.MotionPrimitives.GenerationTree import a_st
 from smarc_modelling.motion_planning.MotionPrimitives.PlotResults import *
 from smarc_modelling.motion_planning.MotionPrimitives.trm_colors import *
 from smarc_modelling.motion_planning.MotionPrimitives.StatisticalAnalysis import runStatisticalAnalysis
+from smarc_modelling.motion_planning.MotionPrimitives.mp_planner import SAMPlanner
 #from smarc_modelling.sam_sim import plot_results, Sol
 import time
 import matplotlib.animation as animation
