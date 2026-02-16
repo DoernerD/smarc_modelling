@@ -244,9 +244,12 @@ class SAM_casadi():
         self.p_OB_O = np.array([0., 0, 0], float)  # CB w.r.t. to the CO
 
         # Rigid-body mass matrix expressed in CO
+        
+        #### Nacho: this can't be. We need this inputs from the latest state of the vehicle
         u_init = np.zeros(6)
-        u_init[0] = 72 
-        u_init[1] = 75 #45
+        u_init[0] = 50  # VBS to middle
+        u_init[1] = 50 # LCG to middle
+        
         self.x_vbs_init = self.calculate_vbs_position(u_init)
         # Update actuators
         self.x_vbs = self.calculate_vbs_position(u_init) 
@@ -273,30 +276,39 @@ class SAM_casadi():
                 (2 - e ** 2) * (2 * e ** 2 - (2 - e ** 2) * (beta_0 - alpha_0)))
 
         # Weight and buoyancy 
-        # NOTE: SAM is initialized with the VBS half filled alread.
         self.W = self.m * self.g
-        self.B = self.W 
+        # Compute buoyancy based on the volume of the cylinder + hemispherical and conical frustum end caps
+        # self.r = 0.02
+        # self.Le = 0.1 
+        # self.B = self.rho_w * self.g * math.pi * (
+        #             (self.ss.d_ss/2)**2 * (self.ss.l_ss-0.1)
+        #             + (2/3) * (self.ss.d_ss/2)**3
+        #             + (self.Le/3) * ((self.ss.d_ss/2)**2 + (self.ss.d_ss/2)*self.r + self.r**2)
+        #         )
+        self.B = self.W  # Start neutrally buoyant
 
         # Damping matrix based on Bhat 2021
         # Parameters from smarc_advanced_controllers mpc_inverted_pendulum...
-
         self.D = np.zeros((6,6))
 
         # NOTE: These need to be identified properly
         # Damping coefficients
-        self.Xuu = 1e-0 * 50 # default: 3 #100     # x-damping
-        self.Yvv = 1e-1 * 50 # default: 50    # y-damping
-        self.Zww = 1e1 * 150 # default: 50    # z-damping
-        self.Kpp = 1e-1 * 40 # default: 40    # Roll damping
-        self.Mqq = 1e-2 * 150 # default: 200    # Pitch damping
-        self.Nrr = 1e1 * 150 # default: 10    # Yaw dampin
 
-        #self.Xuu = 3 #100     # x-damping
-        #self.Yvv = 50    # y-damping
-        #self.Zww = 50    # z-damping
-        #self.Kpp = 40    # Roll damping
-        #self.Mqq = 200    # Pitch damping
-        #self.Nrr = 10    # Yaw damping
+        # Modified for turbo turning
+        self.Xuu = 1e-0 * 50 # default: 3 #100     # x-damping
+        self.Yvv = 1e-1 * 20000 # default: 50    # y-damping
+        self.Zww = 1e1 * 150 # default: 50    # z-damping
+        self.Kpp = 1e-1 * 400 # default: 40    # Roll damping
+        self.Mqq = 1e-2 * 150 # default: 200    # Pitch damping
+        self.Nrr = 1e1 * 15 # default: 10    # Yaw dampin
+
+        # Currently used by David
+        # self.Xuu = 1e-0 * 50 # default: 3 #100     # x-damping
+        # self.Yvv = 1e-1 * 50 # default: 50    # y-damping
+        # self.Zww = 1e1 * 150 # default: 50    # z-damping
+        # self.Kpp = 1e-1 * 40 # default: 40    # Roll damping
+        # self.Mqq = 1e-2 * 150 # default: 200    # Pitch damping
+        # self.Nrr = 1e1 * 150 # default: 10    # Yaw dampin
 
         # Center of effort -> where the thrust force acts?
         self.x_cp = 0.1
