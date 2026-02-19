@@ -54,6 +54,8 @@ Methods:
           control pitch (nose up/down).
         - **delta_r**: Rudder angle for horizontal thrust vectoring, used to
           control yaw (turning left/right).
+    Frame and sign convention (NED/FRD): positive delta_r (rudder) gives
+    positive yaw rate and thus a starboard (right) turn.
         - **rpm_1**: Propeller RPM for the first (counter-rotating) propeller,
           controlling forward thrust.
         - **rpm_2**: Propeller RPM for the second (counter-rotating) propeller,
