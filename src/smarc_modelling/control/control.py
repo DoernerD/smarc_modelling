@@ -47,7 +47,7 @@ class NMPC:
         # - Sway (v): NOT controllable (consequence of turning) -> minimal penalty
         # - Heave (w): Partially controllable via VBS/pitch -> moderate penalty
         # CRITICAL: Focus on POSITION+ORIENTATION, not velocities. Let MPC decide how to get there.
-        Q_diag[7] = 2.0  # surge velocity (u): Light penalty to allow motion but reduce overshoot (was 1.0, originally 50)
+        Q_diag[7] = 5.0  # surge velocity (u): Light penalty to allow motion but reduce overshoot (was 1.0, originally 50)
         Q_diag[8] = (
             0.01  # sway velocity (v): Minimal penalty - uncontrollable for nonholonomic vehicle
         )
@@ -141,8 +141,8 @@ class NMPC:
         vel_ubx = np.array([x_dot_max, y_dot_max, z_dot_max])
 
         # --- actuator state bounds for x[13:19] = [x_vbs, x_lcg, δs, δr, rpm1, rpm2] ---
-        act_lbx = np.array([0.0, 0.0, -np.deg2rad(7), -np.deg2rad(7), -400.0, -400.0])
-        act_ubx = np.array([100.0, 100.0, np.deg2rad(7), np.deg2rad(7), 400.0, 400.0])
+        act_lbx = np.array([0.0, 0.0, -np.deg2rad(7), -np.deg2rad(7), -700.0, -700.0])
+        act_ubx = np.array([100.0, 100.0, np.deg2rad(7), np.deg2rad(7), 500.0, 500.0])
 
         ## Hard Constraints
         idxbx = np.r_[[0, 1, 2], [13, 14, 15, 16, 17, 18]]  # 9 indices total
