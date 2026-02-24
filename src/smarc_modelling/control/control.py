@@ -63,7 +63,7 @@ class NMPC:
         Q_diag[14] = 1e-4  # LCG:      Standard: 1e-4
         Q_diag[15] = 5e2  # stern_angle:   Standard: 100
         Q_diag[16] = 1e2  # rudder_angle: Increased for smoother control (was 1e0)
-        Q_diag[17] = 1e-7  # 1e-3            # RPM1: Standard: 1e-6
+        Q_diag[17] = 1e-6  # 1e-3            # RPM1: Standard: 1e-6
         Q_diag[18] = 1e-6  # 1e-3            # RPM2: Standard: 1e-6
         Q = np.diag(Q_diag)
 
@@ -74,7 +74,7 @@ class NMPC:
         R_diag[1] = 1e-1  # LCG
         R_diag[2] = 1e2
         R_diag[3] = 1e0  # 1e3
-        R_diag[4] = 1e-7
+        R_diag[4] = 1e-6
         R_diag[5] = 1e-6
         R = np.diag(R_diag)
 
@@ -142,8 +142,8 @@ class NMPC:
         vel_ubx = np.array([x_dot_max, y_dot_max, z_dot_max])
 
         # --- actuator state bounds for x[13:19] = [x_vbs, x_lcg, δs, δr, rpm1, rpm2] ---
-        act_lbx = np.array([0.0, 0.0, -np.deg2rad(7), -np.deg2rad(7), -700.0, -700.0])
-        act_ubx = np.array([100.0, 100.0, np.deg2rad(7), np.deg2rad(7), 500.0, 500.0])
+        act_lbx = np.array([0.0, 0.0, -np.deg2rad(7), -np.deg2rad(7), -500.0, -500.0])
+        act_ubx = np.array([100.0, 100.0, np.deg2rad(7), np.deg2rad(7), 450.0, 450.0])
 
         ## Hard Constraints
         idxbx = np.r_[[0, 1, 2], [13, 14, 15, 16, 17, 18]]  # 9 indices total
