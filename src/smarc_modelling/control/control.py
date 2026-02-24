@@ -47,7 +47,7 @@ class NMPC:
         # - Sway (v): NOT controllable (consequence of turning) -> minimal penalty
         # - Heave (w): Partially controllable via VBS/pitch -> moderate penalty
         # CRITICAL: Focus on POSITION+ORIENTATION, not velocities. Let MPC decide how to get there.
-        Q_diag[7] = 5.0  # surge velocity (u): Light penalty to allow motion but reduce overshoot (was 1.0, originally 50)
+        Q_diag[7] = 15.0  # surge velocity (u): Light penalty to allow motion but reduce overshoot (was 1.0, originally 50)
         Q_diag[8] = (
             0.01  # sway velocity (v): Minimal penalty - uncontrollable for nonholonomic vehicle
         )
@@ -63,19 +63,20 @@ class NMPC:
         Q_diag[14] = 1e-4  # LCG:      Standard: 1e-4
         Q_diag[15] = 5e2  # stern_angle:   Standard: 100
         Q_diag[16] = 1e2  # rudder_angle: Increased for smoother control (was 1e0)
-        Q_diag[17:] = 1e-6  # 1e-3            # RPM1 And RPM2: Standard: 1e-6
-        # Q_diag[13:] = Q_diag[13:  ]   # Adjustment to all control weights
+        Q_diag[17] = 1e-7  # 1e-3            # RPM1: Standard: 1e-6
+        Q_diag[18] = 1e-6  # 1e-3            # RPM2: Standard: 1e-6
         Q = np.diag(Q_diag)
 
         # Control rate of change weight matrix - control inputs as [x_vbs, x_lcg, delta_s, delta_r, rpm1, rpm2]
-        # SIM Version
+        # SIM Version (also runs on SAM)
         R_diag = np.ones(self.nu)
         R_diag[0] = 1e-2  # 1e-1        # VBS
         R_diag[1] = 1e-1  # LCG
         R_diag[2] = 1e2
         R_diag[3] = 1e0  # 1e3
-        R_diag[4:] = 1e-5
-        R = np.diag(R_diag)  # *1e-3
+        R_diag[4] = 1e-7
+        R_diag[5] = 1e-6
+        R = np.diag(R_diag)
 
         # SAM Tuned
         # R_diag = np.ones(self.nu)
