@@ -63,8 +63,8 @@ class NMPC:
         Q_diag[14] = 1e-4  # LCG:      Standard: 1e-4
         Q_diag[15] = 5e2  # stern_angle:   Standard: 100
         Q_diag[16] = 1e2  # rudder_angle: Increased for smoother control (was 1e0)
-        Q_diag[17] = 1e-6  # 1e-3            # RPM1: Standard: 1e-6
-        Q_diag[18] = 1e-6  # 1e-3            # RPM2: Standard: 1e-6
+        Q_diag[17] = 1e-8  # 1e-3            # RPM1: Standard: 1e-6
+        Q_diag[18] = 1e-8  # 1e-3            # RPM2: Standard: 1e-6
         Q = np.diag(Q_diag)
 
         # Control rate of change weight matrix - control inputs as [x_vbs, x_lcg, delta_s, delta_r, rpm1, rpm2]
@@ -74,8 +74,8 @@ class NMPC:
         R_diag[1] = 1e-1  # LCG
         R_diag[2] = 1e2
         R_diag[3] = 1e0  # 1e3
-        R_diag[4] = 1e-6
-        R_diag[5] = 1e-6
+        R_diag[4] = 1e-9
+        R_diag[5] = 1e-9
         R = np.diag(R_diag)
 
         # SAM Tuned
@@ -126,7 +126,7 @@ class NMPC:
         # --- position bounds (NED: z positive down) ---
         # Tank limits in meters
         x_min, x_max = 0.0, 8.0
-        y_min, y_max = -2.0, 2.0
+        y_min, y_max = -1.5, 1.5
         z_min, z_max = -0.5, 3.0
 
         pos_lbx = np.array([x_min, y_min, z_min])
