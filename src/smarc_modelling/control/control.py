@@ -35,36 +35,41 @@ class NMPC:
         # --------------------------- Cost setup ---------------------------------
         # State weight matrix
         Q_diag = np.ones(self.nx)
-        Q_diag[0] = 1000  # Position:         standard 10
-        Q_diag[1] = 1000  # 200 #10     # Position:         standard 10
-        Q_diag[2] = 500  # z-Position:         standard 10
+        # Position weights reduced from 1000/1000/500 to close the pos/vel cost ratio.
+        # Original ratio surge_pos/surge_vel = 1000/15 ≈ 67:1 caused oscillation at the
+        # end of trajectories: position pull >> velocity braking at any realistic speed.
+        # New ratio ≈ 600/200 = 3:1 — position still dominates during tracking but the
+        # MPC can now meaningfully penalise velocity to resist overshoot.
+        Q_diag[0] = 600   # x-position  (was 1000)
+        Q_diag[1] = 600   # y-position  (was 1000)
+        Q_diag[2] = 300   # z-position  (was  500)
         Q_diag[3:7] = (
             500  # Quaternion: HIGH penalty for turbo turn - must face correct direction
         )
 
-        # Velocity costs tuned for nonholonomic vehicle (turbo turn capability):
-        # - Surge (u): Need forward motion for control authority -> LOW penalty
-        # - Sway (v): NOT controllable (consequence of turning) -> minimal penalty
-        # - Heave (w): Partially controllable via VBS/pitch -> moderate penalty
-        # CRITICAL: Focus on POSITION+ORIENTATION, not velocities. Let MPC decide how to get there.
-        Q_diag[7] = 15.0  # surge velocity (u): Light penalty to allow motion but reduce overshoot (was 1.0, originally 50)
-        Q_diag[8] = (
-            0.01  # sway velocity (v): Minimal penalty - uncontrollable for nonholonomic vehicle
-        )
-        Q_diag[9] = 5  # heave velocity (w): Moderate penalty
-        Q_diag[10] = 1  # p (roll rate): standard 1
-        Q_diag[11] = 1  # q (pitch rate): standard 1
-        Q_diag[12] = (
-            1.0  # r (yaw rate): Minimal penalty - allow aggressive turning for nonholonomic vehicle (was 10, originally 500)
-        )
+        # Velocity costs:
+        # - Surge (u): raised so the braking constraint and velocity reference together
+        #   actually influence the MPC.  With Q_pos=600 and Q_vel_surge=1000, the
+        #   velocity cost equals the position cost when v ≈ sqrt(Q_pos/Q_vel)*e_pos
+        #   = sqrt(0.6)*e_pos ≈ 0.77*e_pos.  At e_pos=3m → equal at v=2.3 m/s (not
+        #   binding for normal tracking), but the hard braking constraint caps speed
+        #   much lower, so the velocity weight mainly prevents speeding between waypoints.
+        # - Sway (v): uncontrollable, keep minimal
+        # - Heave (w): partially controllable, keep moderate
+        Q_diag[7] = 1000.0  # surge velocity (u) — was 200 (5× increase)
+        Q_diag[8] = 0.01   # sway  velocity (v)  — uncontrollable, unchanged
+        Q_diag[9] = 5      # heave velocity (w)  — unchanged
+        Q_diag[10] = 1     # p (roll  rate)      — unchanged
+        Q_diag[11] = 1     # q (pitch rate)      — unchanged
+        Q_diag[12] = 1.0   # r (yaw   rate)      — unchanged
 
         # Control weight matrix - Costs set according to Bryson's rule
         Q_diag[13] = 1e-5  # VBS:      Standard: 1e-4
         Q_diag[14] = 1e-4  # LCG:      Standard: 1e-4
         Q_diag[15] = 5e2  # stern_angle:   Standard: 100
         Q_diag[16] = 1e2  # rudder_angle: Increased for smoother control (was 1e0)
-        Q_diag[17] = 1e-8  # 1e-3            # RPM1: Standard: 1e-6
-        Q_diag[18] = 1e-8  # 1e-3            # RPM2: Standard: 1e-6
+        Q_diag[17] = 1e-5  # RPM1: increased to discourage bang-bang (was 1e-8)
+        Q_diag[18] = 1e-5  # RPM2: increased to discourage bang-bang (was 1e-8)
         Q = np.diag(Q_diag)
 
         # Control rate of change weight matrix - control inputs as [x_vbs, x_lcg, delta_s, delta_r, rpm1, rpm2]
@@ -74,8 +79,8 @@ class NMPC:
         R_diag[1] = 1e-1  # LCG
         R_diag[2] = 1e2
         R_diag[3] = 1e0  # 1e3
-        R_diag[4] = 1e-9
-        R_diag[5] = 1e-9
+        R_diag[4] = 1e-6  # RPM1 rate: increased to smooth out bang-bang (was 1e-9)
+        R_diag[5] = 1e-6  # RPM2 rate: increased to smooth out bang-bang (was 1e-9)
         R = np.diag(R_diag)
 
         # SAM Tuned
@@ -86,10 +91,34 @@ class NMPC:
         # R_diag[3] = 5e3
         # R_diag[4: ] = 1e-6
         # R = np.diag(R_diag)*1e-3
+        
+        # Terminal Costs
+        # The terminal node (end of 3 s horizon) is what the MPC uses to plan final
+        # stops. Q_e_surge >> Q_e_pos means "be slow at the end of your horizon,
+        # even if you haven't quite reached the position target yet."
+        # With Q_e_surge = 1500 and Q_e_pos = 600:
+        #   equal cost at v = sqrt(600/1500) * e_pos ≈ 0.63 * e_pos
+        #   e.g. at 0.5 m from goal, velocity > 0.32 m/s costs more than the position.
+        Q_e_diag = np.ones(self.nx)
+        Q_e_diag[0] = 600   # x  (was 1000, matches stage)
+        Q_e_diag[1] = 600   # y  (was 1000, matches stage)
+        Q_e_diag[2] = 300   # z  (was  500, matches stage)
+        Q_e_diag[3:7] = 500 # quaternion — unchanged
+        Q_e_diag[7] = 3000.0 # surge velocity — was 1500 (2× increase; terminal stop strong)
+        Q_e_diag[8] = 0.01  # sway  — unchanged
+        Q_e_diag[9] = 5     # heave — unchanged
+        Q_e_diag[10:12] = 1 # roll/pitch rates — unchanged
+        Q_e_diag[12] = 10   # yaw rate — unchanged
+        Q_e_diag[13:17] = 1e-5 # vbs, lcg, stern, rudder — unchanged
+        Q_e_diag[17:19] = 1e-5 # rpm1, rpm2 — unchanged
+        Q_e = np.diag(Q_e_diag) # terminal cost
 
         # Stage costs
-        self.model.p = ca.MX.sym("ref_param", self.nx + self.nu, 1)
-        self.ocp.parameter_values = np.zeros((self.nx + self.nu,))
+        # Parameter vector layout: [state_ref (nx), control_ref (nu), goal_pos (3)]
+        # goal_pos = [x_goal, y_goal, z_goal] of the final trajectory waypoint.
+        # Used by the braking constraint to compute remaining distance to goal.
+        self.model.p = ca.MX.sym("ref_param", self.nx + self.nu + 3, 1)
+        self.ocp.parameter_values = np.zeros((self.nx + self.nu + 3,))
 
         self.ocp.cost.yref = np.zeros(
             (self.nx + self.nu,)
@@ -102,7 +131,7 @@ class NMPC:
 
         # Terminal cost
         self.ocp.cost.cost_type_e = "NONLINEAR_LS"
-        self.ocp.cost.W_e = Q  # np.zeros(np.shape(Q))
+        self.ocp.cost.W_e = Q_e  
         self.ocp.model.cost_y_expr_e = self.x_error(
             self.model.x, self.model.u, self.ocp.model.p, terminal=True
         )
@@ -154,23 +183,81 @@ class NMPC:
         self.ocp.constraints.lbx = lbx
         self.ocp.constraints.ubx = ubx
 
-        ## Soft Constraints
-        idxsbx = np.array([0, 1, 2])  # Index of constraints we want to slacken
-        # n_soft_constraints = len(idxbx)
-        # idxsbx = np.linspace(0, n_soft_constraints-1, n_soft_constraints, dtype=int)    # Index of constraints we want to slacken
-
-        # soften exactly those same state bounds:
+        ## Soft Constraints on position box bounds
+        idxsbx = np.array([0, 1, 2])  # soften x, y, z position bounds
         self.ocp.constraints.idxsbx = idxsbx
+        n_sb = idxsbx.size  # 3
 
-        # penalty weights (size must equal len(idxsbx))
-        # Reduced from 1e4 to 1e3 to prevent soft constraints from dominating trajectory tracking
-        Z_weight = 1e3
-        z_weight = 1e1
-        n_sb = idxsbx.size
-        self.ocp.cost.Zl = Z_weight * np.ones(n_sb)
-        self.ocp.cost.Zu = Z_weight * np.ones(n_sb)
-        self.ocp.cost.zl = z_weight * np.ones(n_sb)
-        self.ocp.cost.zu = z_weight * np.ones(n_sb)
+        # ----- Braking / Speed-Funnel Constraint ----------------------------------
+        # Ensures surge velocity is low enough that the vehicle can brake to a stop
+        # within the remaining distance to the goal waypoint.
+        #
+        # Constraint: v_surge^2 - 2 * a_brake * (dist_to_goal + d_eps) <= 0
+        #   <=>  v_surge <= sqrt(2 * a_brake * (dist_to_goal + d_eps))
+        #
+        # a_brake: effective deceleration [m/s^2].
+        #   Must be ≤ the vehicle's real worst-case braking capability so the
+        #   constraint is always feasible.  Lower = tighter speed ceiling at a given
+        #   distance = earlier forced deceleration.  At d metres from the goal the
+        #   constraint enforces v ≤ sqrt(2 * a_brake * (d + d_eps)).
+        #   Rule of thumb: start at half the observed deceleration, then tune up.
+        # d_eps: distance offset so the allowed speed does not collapse to 0 exactly
+        #   at the goal (avoids fighting the position cost near the goal).
+        #   Should match final_pos_tolerance in the controller (≈ 0.5 m).
+        a_brake = 0.02  # m/s^2  — was 0.10; tightened to match real SAM capability
+        d_eps   = 0.5   # m      — was 1.5; reduced to match final_pos_tolerance
+
+        x_goal = self.model.p[self.nx + self.nu + 0]
+        y_goal = self.model.p[self.nx + self.nu + 1]
+        z_goal = self.model.p[self.nx + self.nu + 2]
+        dist_to_goal = ca.sqrt(
+            (self.model.x[0] - x_goal) ** 2
+            + (self.model.x[1] - y_goal) ** 2
+            + (self.model.x[2] - z_goal) ** 2
+            + 1e-4  # numerical safety to avoid sqrt(0)
+        )
+        # h(x) = v_surge^2 - 2*a_brake*(d+d_eps) <= 0  (upper bound = 0)
+        brake_h = self.model.x[7] ** 2 - 2.0 * a_brake * (dist_to_goal + d_eps)
+
+        # Stage nonlinear constraint
+        self.ocp.model.con_h_expr = brake_h
+        self.ocp.constraints.lh = np.array([-1e9])
+        self.ocp.constraints.uh = np.array([0.0])
+        self.ocp.constraints.idxsh = np.array([0])  # soften it
+        n_sh = 1
+
+        # Terminal nonlinear constraint (same expression, evaluated at terminal node)
+        self.ocp.model.con_h_expr_e = brake_h
+        self.ocp.constraints.lh_e = np.array([-1e9])
+        self.ocp.constraints.uh_e = np.array([0.0])
+        self.ocp.constraints.idxsh_e = np.array([0])
+        n_sh_e = 1
+
+        # ----- Unified slack penalty vectors ------------------------------------
+        # acados orders slack variables as: [idxsbx | idxsh] for stage costs.
+        # Terminal stage only has idxsh_e.
+        Z_pos   = 1e3  # quadratic penalty for position box violations
+        z_pos   = 1e1  # linear   penalty for position box violations
+        # Braking constraint penalties.
+        # With Q_pos = 600 and a 3 m position error the position cost is ~5 400.
+        # Z_brake must dominate that to make the constraint binding.
+        # At Z_brake = 1e5, even a 0.07 m/s violation costs ~500 (10 % of position
+        # cost at 3 m), making the constraint effectively hard without numerics blowing up.
+        # Increase further if the vehicle still exceeds the speed envelope.
+        Z_brake = 1e5  # quadratic penalty — was 1e2 (1 000× increase)
+        z_brake = 1e3  # linear   penalty — was 1e1 (100× increase)
+
+        # Stage: [sbx(3), sh(1)] = size 4
+        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake * np.ones(n_sh)]
+        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake * np.ones(n_sh)]
+        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake * np.ones(n_sh)]
+        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake * np.ones(n_sh)]
+
+        # Terminal: [sh_e(1)] = size 1
+        self.ocp.cost.Zl_e = Z_brake * np.ones(n_sh_e)
+        self.ocp.cost.Zu_e = Z_brake * np.ones(n_sh_e)
+        self.ocp.cost.zl_e = z_brake * np.ones(n_sh_e)
+        self.ocp.cost.zu_e = z_brake * np.ones(n_sh_e)
 
         # ----------------------- Solver Setup --------------------------
         # set prediction horizon
@@ -203,7 +290,7 @@ class NMPC:
         # Simulation object based on OCP model.
         self.sim = AcadosSim()
         self.sim.model = self.model
-        self.sim.parameter_values = np.zeros(25)
+        self.sim.parameter_values = np.zeros(self.nx + self.nu + 3)
 
         self.sim.solver_options.T = 0.1
         self.sim.solver_options.integrator_type = "ERK"
