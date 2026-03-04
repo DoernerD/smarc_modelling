@@ -42,10 +42,8 @@ class NMPC:
         # MPC can now meaningfully penalise velocity to resist overshoot.
         Q_diag[0] = 600   # x-position  (was 1000)
         Q_diag[1] = 600   # y-position  (was 1000)
-        Q_diag[2] = 300   # z-position  (was  500)
-        Q_diag[3:7] = (
-            500  # Quaternion: HIGH penalty for turbo turn - must face correct direction
-        )
+        Q_diag[2] = 1000   # z-position  (was  500)
+        Q_diag[3:7] = 500  # Quaternion: HIGH penalty for turbo turn - must face correct direction
 
         # Velocity costs:
         # - Surge (u): raised so the braking constraint and velocity reference together
@@ -58,7 +56,7 @@ class NMPC:
         # - Heave (w): partially controllable, keep moderate
         Q_diag[7] = 1000.0  # surge velocity (u) — was 200 (5× increase)
         Q_diag[8] = 0.01   # sway  velocity (v)  — uncontrollable, unchanged
-        Q_diag[9] = 5      # heave velocity (w)  — unchanged
+        Q_diag[9] = 500    # heave velocity (w)  — raised from 5; makes ref[9] a meaningful dive/surface signal
         Q_diag[10] = 1     # p (roll  rate)      — unchanged
         Q_diag[11] = 1     # q (pitch rate)      — unchanged
         Q_diag[12] = 1.0   # r (yaw   rate)      — unchanged
@@ -66,7 +64,7 @@ class NMPC:
         # Control weight matrix - Costs set according to Bryson's rule
         Q_diag[13] = 1e-5  # VBS:      Standard: 1e-4
         Q_diag[14] = 1e-4  # LCG:      Standard: 1e-4
-        Q_diag[15] = 5e2  # stern_angle:   Standard: 100
+        Q_diag[15] = 1e2  # stern_angle:   Standard: 100
         Q_diag[16] = 1e2  # rudder_angle: Increased for smoother control (was 1e0)
         Q_diag[17] = 1e-5  # RPM1: increased to discourage bang-bang (was 1e-8)
         Q_diag[18] = 1e-5  # RPM2: increased to discourage bang-bang (was 1e-8)
@@ -77,8 +75,8 @@ class NMPC:
         R_diag = np.ones(self.nu)
         R_diag[0] = 1e-2  # 1e-1        # VBS
         R_diag[1] = 1e-1  # LCG
-        R_diag[2] = 1e2
-        R_diag[3] = 1e0  # 1e3
+        R_diag[2] = 1e0     # stern angle
+        R_diag[3] = 1e0     # rudder angle
         R_diag[4] = 1e-6  # RPM1 rate: increased to smooth out bang-bang (was 1e-9)
         R_diag[5] = 1e-6  # RPM2 rate: increased to smooth out bang-bang (was 1e-9)
         R = np.diag(R_diag)
@@ -106,7 +104,7 @@ class NMPC:
         Q_e_diag[3:7] = 500 # quaternion — unchanged
         Q_e_diag[7] = 3000.0 # surge velocity — was 1500 (2× increase; terminal stop strong)
         Q_e_diag[8] = 0.01  # sway  — unchanged
-        Q_e_diag[9] = 5     # heave — unchanged
+        Q_e_diag[9] = 500   # heave — raised from 5 (matches stage weight)
         Q_e_diag[10:12] = 1 # roll/pitch rates — unchanged
         Q_e_diag[12] = 10   # yaw rate — unchanged
         Q_e_diag[13:17] = 1e-5 # vbs, lcg, stern, rudder — unchanged
