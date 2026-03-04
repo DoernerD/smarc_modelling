@@ -202,7 +202,7 @@ class NMPC:
         # d_eps: distance offset so the allowed speed does not collapse to 0 exactly
         #   at the goal (avoids fighting the position cost near the goal).
         #   Should match final_pos_tolerance in the controller (≈ 0.5 m).
-        a_brake = 0.02  # m/s^2  — was 0.10; tightened to match real SAM capability
+        a_brake = 0.01  # m/s^2  — was 0.10; tightened to match real SAM capability
         d_eps   = 0.5   # m      — was 1.5; reduced to match final_pos_tolerance
 
         x_goal = self.model.p[self.nx + self.nu + 0]
