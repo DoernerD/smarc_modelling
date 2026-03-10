@@ -217,19 +217,66 @@ class NMPC:
         # h(x) = v_surge^2 - 2*a_brake*(d+d_eps) <= 0  (upper bound = 0)
         brake_h = self.model.x[7] ** 2 - 2.0 * a_brake * (dist_to_goal + d_eps)
 
-        # Stage nonlinear constraint
-        self.ocp.model.con_h_expr = brake_h
-        self.ocp.constraints.lh = np.array([-1e9])
-        self.ocp.constraints.uh = np.array([0.0])
-        self.ocp.constraints.idxsh = np.array([0])  # soften it
-        n_sh = 1
+        # ----- RPM Funnel Constraint -------------------------------------------
+        # On the real SAM the thrusters have a deadzone of roughly ±rpm_deadzone RPM:
+        # commands in that range produce no thrust regardless of direction, so the
+        # vehicle coasts even when the MPC thinks it is braking (or accelerating).
+        #
+        # The funnel magnitude is the same in both directions:
+        #
+        #   rpm_mag(d) = (rpm_max + rpm_deadzone) * min(d / d_rpm_trigger, 1) - rpm_deadzone
+        #
+        #   d >= d_rpm_trigger  →  rpm_mag = rpm_max   (constraint inactive)
+        #   d = d_rpm_trigger/2 →  rpm_mag ≈ rpm_max/2
+        #   d = 0               →  rpm_mag = -rpm_deadzone  (forced past the deadzone)
+        #
+        # The direction is determined by the sign of the current surge velocity:
+        #   surge > 0  (moving forward)  →  upper bound:  rpm <=  rpm_mag
+        #   surge < 0  (moving backward) →  lower bound:  rpm >= -rpm_mag
+        #   surge ≈ 0                    →  both bounds collapse toward ±rpm_deadzone,
+        #                                   keeping RPM outside the deadzone
+        #
+        # This ensures the thruster is always pushed *through* the ±200 RPM deadzone
+        # into active braking territory, regardless of which direction the AUV is
+        # approaching from.
+        rpm_deadzone  = 200.0   # [RPM] deadzone on real SAM thrusters
+        d_rpm_trigger = 1.0     # [m]   distance at which RPM cap starts tightening
+        rpm_max_val   = act_ubx[4]  # 450 RPM — matches the state box constraint
 
-        # Terminal nonlinear constraint (same expression, evaluated at terminal node)
-        self.ocp.model.con_h_expr_e = brake_h
-        self.ocp.constraints.lh_e = np.array([-1e9])
-        self.ocp.constraints.uh_e = np.array([0.0])
-        self.ocp.constraints.idxsh_e = np.array([0])
-        n_sh_e = 1
+        rpm_mag = (rpm_max_val + rpm_deadzone) * ca.fmin(
+            dist_to_goal / d_rpm_trigger, 1.0
+        ) - rpm_deadzone
+
+        surge = self.model.x[7]  # surge velocity (body-frame x)
+
+        # Upper bound active when moving forward; lower bound active when moving backward.
+        # ca.if_else is smooth in CasADi for SQP — the branch is chosen symbolically.
+        rpm_upper_cap = ca.if_else(surge >= 0,  rpm_mag,  rpm_max_val)
+        rpm_lower_cap = ca.if_else(surge <  0, -rpm_mag, -rpm_max_val)
+
+        # h_upper = rpm - rpm_upper_cap <= 0
+        # h_lower = rpm_lower_cap - rpm <= 0  (i.e. rpm >= rpm_lower_cap)
+        rpm_h = ca.vertcat(
+            self.model.x[17] - rpm_upper_cap,   # rpm1 upper
+            self.model.x[18] - rpm_upper_cap,   # rpm2 upper
+            rpm_lower_cap - self.model.x[17],   # rpm1 lower
+            rpm_lower_cap - self.model.x[18],   # rpm2 lower
+        )
+
+        # Stage nonlinear constraint: stack velocity funnel + RPM funnel (4 rpm terms)
+        # con_h layout: [brake_h(1), rpm1_upper(1), rpm2_upper(1), rpm1_lower(1), rpm2_lower(1)]
+        self.ocp.model.con_h_expr = ca.vertcat(brake_h, rpm_h)
+        self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9, -1e9, -1e9])
+        self.ocp.constraints.uh = np.array([0.0,  0.0,  0.0,  0.0,  0.0])
+        self.ocp.constraints.idxsh = np.arange(5)  # soften all five
+        n_sh = 5
+
+        # Terminal nonlinear constraint (same expressions, evaluated at terminal node)
+        self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, rpm_h)
+        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9, -1e9, -1e9])
+        self.ocp.constraints.uh_e = np.array([0.0,  0.0,  0.0,  0.0,  0.0])
+        self.ocp.constraints.idxsh_e = np.arange(5)
+        n_sh_e = 5
 
         # ----- Unified slack penalty vectors ------------------------------------
         # acados orders slack variables as: [idxsbx | idxsh] for stage costs.
@@ -244,18 +291,22 @@ class NMPC:
         # Increase further if the vehicle still exceeds the speed envelope.
         Z_brake = 1e5  # quadratic penalty — was 1e2 (1 000× increase)
         z_brake = 1e3  # linear   penalty — was 1e1 (100× increase)
+        # RPM funnel penalties — large enough to drive RPM through the deadzone
+        # but softer than the velocity constraint so the solver has headroom.
+        Z_rpm   = 5e4
+        z_rpm   = 5e2
 
-        # Stage: [sbx(3), sh(1)] = size 4
-        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake * np.ones(n_sh)]
-        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake * np.ones(n_sh)]
-        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake * np.ones(n_sh)]
-        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake * np.ones(n_sh)]
+        # Stage: [sbx(3), sh_brake(1), sh_rpm(4)] = size 8
+        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake * np.ones(1), Z_rpm * np.ones(4)]
+        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake * np.ones(1), Z_rpm * np.ones(4)]
+        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake * np.ones(1), z_rpm * np.ones(4)]
+        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake * np.ones(1), z_rpm * np.ones(4)]
 
-        # Terminal: [sh_e(1)] = size 1
-        self.ocp.cost.Zl_e = Z_brake * np.ones(n_sh_e)
-        self.ocp.cost.Zu_e = Z_brake * np.ones(n_sh_e)
-        self.ocp.cost.zl_e = z_brake * np.ones(n_sh_e)
-        self.ocp.cost.zu_e = z_brake * np.ones(n_sh_e)
+        # Terminal: [sh_e_brake(1), sh_e_rpm(4)] = size 5
+        self.ocp.cost.Zl_e = np.r_[Z_brake * np.ones(1), Z_rpm * np.ones(4)]
+        self.ocp.cost.Zu_e = np.r_[Z_brake * np.ones(1), Z_rpm * np.ones(4)]
+        self.ocp.cost.zl_e = np.r_[z_brake * np.ones(1), z_rpm * np.ones(4)]
+        self.ocp.cost.zu_e = np.r_[z_brake * np.ones(1), z_rpm * np.ones(4)]
 
         # ----------------------- Solver Setup --------------------------
         # set prediction horizon
