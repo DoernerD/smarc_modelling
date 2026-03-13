@@ -40,10 +40,10 @@ class NMPC:
         # end of trajectories: position pull >> velocity braking at any realistic speed.
         # New ratio ≈ 600/200 = 3:1 — position still dominates during tracking but the
         # MPC can now meaningfully penalise velocity to resist overshoot.
-        Q_diag[0] = 600   # x-position  (was 1000)
-        Q_diag[1] = 600   # y-position  (was 1000)
+        Q_diag[0] = 1000   # x-position  (was 1000)
+        Q_diag[1] = 1000   # y-position  (was 1000)
         Q_diag[2] = 1000   # z-position  (was  500)
-        Q_diag[3:7] = 500  # Quaternion: HIGH penalty for turbo turn - must face correct direction
+        Q_diag[3:7] = 1  # Quaternion:  low penalty, the planner guides the vehicle to the correct heading
 
         # Velocity costs:
         # - Surge (u): raised so the braking constraint and velocity reference together
@@ -54,7 +54,7 @@ class NMPC:
         #   much lower, so the velocity weight mainly prevents speeding between waypoints.
         # - Sway (v): uncontrollable, keep minimal
         # - Heave (w): partially controllable, keep moderate
-        Q_diag[7] = 1000.0  # surge velocity (u) — was 200 (5× increase)
+        Q_diag[7] = 500.0  # surge velocity (u) — was 200 (5× increase)
         Q_diag[8] = 0.01   # sway  velocity (v)  — uncontrollable, unchanged
         Q_diag[9] = 500    # heave velocity (w)  — raised from 5; makes ref[9] a meaningful dive/surface signal
         Q_diag[10] = 1     # p (roll  rate)      — unchanged
@@ -66,8 +66,8 @@ class NMPC:
         Q_diag[14] = 1e-4  # LCG:      Standard: 1e-4
         Q_diag[15] = 1e2  # stern_angle:   Standard: 100
         Q_diag[16] = 1e2  # rudder_angle: Increased for smoother control (was 1e0)
-        Q_diag[17] = 1e-5  # RPM1: increased to discourage bang-bang (was 1e-8)
-        Q_diag[18] = 1e-5  # RPM2: increased to discourage bang-bang (was 1e-8)
+        Q_diag[17] = 1e-3  # RPM1: strong RPM tracking but below position (600) dominance
+        Q_diag[18] = 1e-3  # RPM2: cost at 300 RPM = 450; position cost at 1m = 600
         Q = np.diag(Q_diag)
 
         # Control rate of change weight matrix - control inputs as [x_vbs, x_lcg, delta_s, delta_r, rpm1, rpm2]
@@ -77,8 +77,8 @@ class NMPC:
         R_diag[1] = 1e-1  # LCG
         R_diag[2] = 1e0     # stern angle
         R_diag[3] = 1e0     # rudder angle
-        R_diag[4] = 1e-6  # RPM1 rate: increased to smooth out bang-bang (was 1e-9)
-        R_diag[5] = 1e-6  # RPM2 rate: increased to smooth out bang-bang (was 1e-9)
+        R_diag[4] = 1e-8  # RPM1 rate: reduced for faster thrust switching during maneuvers
+        R_diag[5] = 1e-8  # RPM2 rate: reduced for faster thrust switching during maneuvers
         R = np.diag(R_diag)
 
         # SAM Tuned
@@ -98,17 +98,17 @@ class NMPC:
         #   equal cost at v = sqrt(600/1500) * e_pos ≈ 0.63 * e_pos
         #   e.g. at 0.5 m from goal, velocity > 0.32 m/s costs more than the position.
         Q_e_diag = np.ones(self.nx)
-        Q_e_diag[0] = 600   # x  (was 1000, matches stage)
-        Q_e_diag[1] = 600   # y  (was 1000, matches stage)
+        Q_e_diag[0] = 800   # x  (was 1000, matches stage)
+        Q_e_diag[1] = 800   # y  (was 1000, matches stage)
         Q_e_diag[2] = 300   # z  (was  500, matches stage)
-        Q_e_diag[3:7] = 500 # quaternion — unchanged
+        Q_e_diag[3:7] = 1 # quaternion — unchanged
         Q_e_diag[7] = 3000.0 # surge velocity — was 1500 (2× increase; terminal stop strong)
         Q_e_diag[8] = 0.01  # sway  — unchanged
         Q_e_diag[9] = 500   # heave — raised from 5 (matches stage weight)
         Q_e_diag[10:12] = 1 # roll/pitch rates — unchanged
         Q_e_diag[12] = 10   # yaw rate — unchanged
         Q_e_diag[13:17] = 1e-5 # vbs, lcg, stern, rudder — unchanged
-        Q_e_diag[17:19] = 1e-5 # rpm1, rpm2 — unchanged
+        Q_e_diag[17:19] = 5e-3 # rpm1, rpm2 — matches stage weight
         Q_e = np.diag(Q_e_diag) # terminal cost
 
         # Stage costs
@@ -193,17 +193,17 @@ class NMPC:
         # Constraint: v_surge^2 - 2 * a_brake * (dist_to_goal + d_eps) <= 0
         #   <=>  v_surge <= sqrt(2 * a_brake * (dist_to_goal + d_eps))
         #
-        # a_brake: effective deceleration [m/s^2].
-        #   Must be ≤ the vehicle's real worst-case braking capability so the
-        #   constraint is always feasible.  Lower = tighter speed ceiling at a given
-        #   distance = earlier forced deceleration.  At d metres from the goal the
-        #   constraint enforces v ≤ sqrt(2 * a_brake * (d + d_eps)).
-        #   Rule of thumb: start at half the observed deceleration, then tune up.
-        # d_eps: distance offset so the allowed speed does not collapse to 0 exactly
-        #   at the goal (avoids fighting the position cost near the goal).
-        #   Should match final_pos_tolerance in the controller (≈ 0.5 m).
-        a_brake = 0.005  # m/s^2  — was 0.10; tightened to match real SAM capability
-        d_eps   = 0.5   # m      — was 1.5; reduced to match final_pos_tolerance
+        # The controller sets goal_pos to an arc-length-adjusted virtual goal so
+        # that dist_to_goal reflects the remaining PATH distance, not the Euclidean
+        # shortcut.  This prevents premature braking on curved trajectories.
+        #
+        # a_brake controls how early the funnel bites.  With a_brake = 0.1 the
+        # speed ceiling at typical distances is well above SAM's cruise speed:
+        #   0.5 m → 0.39 m/s,  1 m → 0.49 m/s,  2 m → 0.63 m/s,  4 m → 0.87 m/s
+        # The funnel only meaningfully limits speed within ~0.5 m of the goal,
+        # which is what we want for trajectory following with end-stop braking.
+        a_brake = 0.1   # m/s^2  (was 0.005 — 20× increase for trajectory following)
+        d_eps   = 0.75  # m      (was 0.5 — matches final_pos_tolerance)
 
         x_goal = self.model.p[self.nx + self.nu + 0]
         y_goal = self.model.p[self.nx + self.nu + 1]
@@ -217,96 +217,71 @@ class NMPC:
         # h(x) = v_surge^2 - 2*a_brake*(d+d_eps) <= 0  (upper bound = 0)
         brake_h = self.model.x[7] ** 2 - 2.0 * a_brake * (dist_to_goal + d_eps)
 
-        # ----- RPM Funnel Constraint -------------------------------------------
-        # On the real SAM the thrusters have a deadzone of roughly ±rpm_deadzone RPM:
-        # commands in that range produce no thrust regardless of direction, so the
-        # vehicle coasts even when the MPC thinks it is braking (or accelerating).
+        # ----- RPM Deadzone Avoidance (distance-independent) ----------------------
+        # SAM thrusters have a ±200 RPM deadzone where no thrust is produced.
         #
-        # The funnel magnitude is the same in both directions:
+        # Complementarity constraint: h = t²(1-t²) ≤ 0, where t = rpm/deadzone.
+        # Three penalty-free operating points:
+        #   rpm = 0    (h = 0, no thrust intended)
+        #   |rpm| = D  (h = 0, at the deadzone boundary)
+        #   |rpm| > D  (h < 0, producing thrust)
+        # Violated only for 0 < |rpm| < D (in the deadzone, where the MPC
+        # expects thrust but the real hardware produces none).
         #
-        #   rpm_mag(d) = (rpm_max + rpm_deadzone) * min(d / d_rpm_trigger, 1) - rpm_deadzone
+        # Gradient behaviour in the deadzone:
+        #   0 < |rpm| < D/√2 ≈ 141:  gradient pushes toward rpm=0
+        #   D/√2 < |rpm| < D = 200:  gradient pushes toward |rpm|=D
+        # This means the solver can freely transit through rpm=0 during
+        # direction switches (no penalty barrier at zero), while the upper
+        # half of the deadzone still gets pushed past the boundary.
         #
-        #   d >= d_rpm_trigger  →  rpm_mag = rpm_max   (constraint inactive)
-        #   d = d_rpm_trigger/2 →  rpm_mag ≈ rpm_max/2
-        #   d = 0               →  rpm_mag = -rpm_deadzone  (forced past the deadzone)
-        #
-        # The direction is determined by the sign of the current surge velocity:
-        #   surge > 0  (moving forward)  →  upper bound:  rpm <=  rpm_mag
-        #   surge < 0  (moving backward) →  lower bound:  rpm >= -rpm_mag
-        #   surge ≈ 0                    →  both bounds collapse toward ±rpm_deadzone,
-        #                                   keeping RPM outside the deadzone
-        #
-        # This ensures the thruster is always pushed *through* the ±200 RPM deadzone
-        # into active braking territory, regardless of which direction the AUV is
-        # approaching from.
-        rpm_deadzone  = 200.0   # [RPM] deadzone on real SAM thrusters
-        d_rpm_trigger = 1.0     # [m]   distance at which RPM cap starts tightening
-        rpm_max_val   = act_ubx[4]  # 450 RPM — matches the state box constraint
+        # The vehicle dynamics model is NOT modified — the full thrust gradient
+        # is preserved for fast SQP_RTI convergence.
+        rpm_dz = 200.0
+        t1 = self.model.x[17] / rpm_dz
+        t2 = self.model.x[18] / rpm_dz
+        h_dz1 = t1**2 * (1.0 - t1**2)
+        h_dz2 = t2**2 * (1.0 - t2**2)
 
-        rpm_mag = (rpm_max_val + rpm_deadzone) * ca.fmin(
-            dist_to_goal / d_rpm_trigger, 1.0
-        ) - rpm_deadzone
+        # con_h layout: [brake_h(1), h_dz1(1), h_dz2(1)]
+        self.ocp.model.con_h_expr = ca.vertcat(brake_h, h_dz1, h_dz2)
+        self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9])
+        self.ocp.constraints.uh = np.array([ 0.0,  0.0,  0.0])
+        self.ocp.constraints.idxsh = np.arange(3)
+        n_sh = 3
 
-        surge = self.model.x[7]  # surge velocity (body-frame x)
-
-        # Upper bound active when moving forward; lower bound active when moving backward.
-        # ca.if_else is smooth in CasADi for SQP — the branch is chosen symbolically.
-        rpm_upper_cap = ca.if_else(surge >= 0,  rpm_mag,  rpm_max_val)
-        rpm_lower_cap = ca.if_else(surge <  0, -rpm_mag, -rpm_max_val)
-
-        # h_upper = rpm - rpm_upper_cap <= 0
-        # h_lower = rpm_lower_cap - rpm <= 0  (i.e. rpm >= rpm_lower_cap)
-        rpm_h = ca.vertcat(
-            self.model.x[17] - rpm_upper_cap,   # rpm1 upper
-            self.model.x[18] - rpm_upper_cap,   # rpm2 upper
-            rpm_lower_cap - self.model.x[17],   # rpm1 lower
-            rpm_lower_cap - self.model.x[18],   # rpm2 lower
-        )
-
-        # Stage nonlinear constraint: stack velocity funnel + RPM funnel (4 rpm terms)
-        # con_h layout: [brake_h(1), rpm1_upper(1), rpm2_upper(1), rpm1_lower(1), rpm2_lower(1)]
-        self.ocp.model.con_h_expr = ca.vertcat(brake_h, rpm_h)
-        self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9, -1e9, -1e9])
-        self.ocp.constraints.uh = np.array([0.0,  0.0,  0.0,  0.0,  0.0])
-        self.ocp.constraints.idxsh = np.arange(5)  # soften all five
-        n_sh = 5
-
-        # Terminal nonlinear constraint (same expressions, evaluated at terminal node)
-        self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, rpm_h)
-        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9, -1e9, -1e9])
-        self.ocp.constraints.uh_e = np.array([0.0,  0.0,  0.0,  0.0,  0.0])
-        self.ocp.constraints.idxsh_e = np.arange(5)
-        n_sh_e = 5
+        # Terminal nonlinear constraint (same structure)
+        self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, h_dz1, h_dz2)
+        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9])
+        self.ocp.constraints.uh_e = np.array([ 0.0,  0.0,  0.0])
+        self.ocp.constraints.idxsh_e = np.arange(3)
+        n_sh_e = 3
 
         # ----- Unified slack penalty vectors ------------------------------------
         # acados orders slack variables as: [idxsbx | idxsh] for stage costs.
         # Terminal stage only has idxsh_e.
-        Z_pos   = 1e3  # quadratic penalty for position box violations
-        z_pos   = 1e1  # linear   penalty for position box violations
-        # Braking constraint penalties.
-        # With Q_pos = 600 and a 3 m position error the position cost is ~5 400.
-        # Z_brake must dominate that to make the constraint binding.
-        # At Z_brake = 1e5, even a 0.07 m/s violation costs ~500 (10 % of position
-        # cost at 3 m), making the constraint effectively hard without numerics blowing up.
-        # Increase further if the vehicle still exceeds the speed envelope.
-        Z_brake = 1e5  # quadratic penalty — was 1e2 (1 000× increase)
-        z_brake = 1e3  # linear   penalty — was 1e1 (100× increase)
-        # RPM funnel penalties — large enough to drive RPM through the deadzone
-        # but softer than the velocity constraint so the solver has headroom.
-        Z_rpm   = 5e4
-        z_rpm   = 5e2
+        Z_pos   = 1e6   # quadratic penalty for position box violations (hard wall)
+        z_pos   = 1e4   # linear   penalty for position box violations
+        Z_brake = 1e3   # quadratic penalty for braking funnel violations
+        z_brake = 1e1   # linear   penalty for braking funnel violations
+        Z_dz    = 200.0 # quadratic penalty for RPM deadzone
+        z_dz    = 20.0  # linear   penalty for RPM deadzone
+        # Complementarity penalty sizing: max violation h=0.25 at |rpm|=141,
+        # giving peak penalty = Z_dz*0.0625 + z_dz*0.25 = 17.5.
+        # Position walls: 0.05m violation costs 1e6*0.0025 + 1e4*0.05 = 3000
+        # per stage — overwhelms any RPM cost (450 at 300 RPM reference).
 
-        # Stage: [sbx(3), sh_brake(1), sh_rpm(4)] = size 8
-        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake * np.ones(1), Z_rpm * np.ones(4)]
-        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake * np.ones(1), Z_rpm * np.ones(4)]
-        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake * np.ones(1), z_rpm * np.ones(4)]
-        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake * np.ones(1), z_rpm * np.ones(4)]
+        # Stage: [sbx(3), sh_brake(1), sh_dz(2)] = size 6
+        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz]
+        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz]
+        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz]
+        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz]
 
-        # Terminal: [sh_e_brake(1), sh_e_rpm(4)] = size 5
-        self.ocp.cost.Zl_e = np.r_[Z_brake * np.ones(1), Z_rpm * np.ones(4)]
-        self.ocp.cost.Zu_e = np.r_[Z_brake * np.ones(1), Z_rpm * np.ones(4)]
-        self.ocp.cost.zl_e = np.r_[z_brake * np.ones(1), z_rpm * np.ones(4)]
-        self.ocp.cost.zu_e = np.r_[z_brake * np.ones(1), z_rpm * np.ones(4)]
+        # Terminal: [sh_e_brake(1), sh_e_dz(2)] = size 3
+        self.ocp.cost.Zl_e = np.r_[Z_brake, Z_dz, Z_dz]
+        self.ocp.cost.Zu_e = np.r_[Z_brake, Z_dz, Z_dz]
+        self.ocp.cost.zl_e = np.r_[z_brake, z_dz, z_dz]
+        self.ocp.cost.zu_e = np.r_[z_brake, z_dz, z_dz]
 
         # ----------------------- Solver Setup --------------------------
         # set prediction horizon
@@ -841,7 +816,5 @@ class NMPC:
         if terminal:
             x_error = ca.vertcat(pos_error, q_att_error, vel_error, u_error)
         else:
-            x_error = ca.vertcat(
-                pos_error, q_att_error, vel_error, u_error, u
-            )  # delta_u(u))
+            x_error = ca.vertcat(pos_error, q_att_error, vel_error, u_error, u)  
         return x_error
