@@ -33,41 +33,17 @@ class NMPC:
         self.update_solver = update_solver_settings
 
         # --------------------------- Cost setup ---------------------------------
-        # State weight matrix
-        Q_diag = np.ones(self.nx)
-        # Position weights reduced from 1000/1000/500 to close the pos/vel cost ratio.
-        # Original ratio surge_pos/surge_vel = 1000/15 ≈ 67:1 caused oscillation at the
-        # end of trajectories: position pull >> velocity braking at any realistic speed.
-        # New ratio ≈ 600/200 = 3:1 — position still dominates during tracking but the
-        # MPC can now meaningfully penalise velocity to resist overshoot.
-        Q_diag[0] = 1000   # x-position  (was 1000)
-        Q_diag[1] = 1000   # y-position  (was 1000)
-        Q_diag[2] = 1000   # z-position  (was  500)
-        Q_diag[3:7] = 1  # Quaternion:  low penalty, the planner guides the vehicle to the correct heading
-
-        # Velocity costs:
-        # - Surge (u): raised so the braking constraint and velocity reference together
-        #   actually influence the MPC.  With Q_pos=600 and Q_vel_surge=1000, the
-        #   velocity cost equals the position cost when v ≈ sqrt(Q_pos/Q_vel)*e_pos
-        #   = sqrt(0.6)*e_pos ≈ 0.77*e_pos.  At e_pos=3m → equal at v=2.3 m/s (not
-        #   binding for normal tracking), but the hard braking constraint caps speed
-        #   much lower, so the velocity weight mainly prevents speeding between waypoints.
-        # - Sway (v): uncontrollable, keep minimal
-        # - Heave (w): partially controllable, keep moderate
-        Q_diag[7] = 500.0  # surge velocity (u) — was 200 (5× increase)
-        Q_diag[8] = 0.01   # sway  velocity (v)  — uncontrollable, unchanged
-        Q_diag[9] = 500    # heave velocity (w)  — raised from 5; makes ref[9] a meaningful dive/surface signal
-        Q_diag[10] = 1     # p (roll  rate)      — unchanged
-        Q_diag[11] = 1     # q (pitch rate)      — unchanged
-        Q_diag[12] = 1.0   # r (yaw   rate)      — unchanged
-
-        # Control weight matrix - Costs set according to Bryson's rule
-        Q_diag[13] = 1e-5  # VBS:      Standard: 1e-4
-        Q_diag[14] = 1e-4  # LCG:      Standard: 1e-4
-        Q_diag[15] = 1e2  # stern_angle:   Standard: 100
-        Q_diag[16] = 1e2  # rudder_angle: Increased for smoother control (was 1e0)
-        Q_diag[17] = 1e-3  # RPM1: strong RPM tracking but below position (600) dominance
-        Q_diag[18] = 1e-3  # RPM2: cost at 300 RPM = 450; position cost at 1m = 600
+        # Stage state weight matrix — position + quaternion + surge velocity.
+        # Quaternion prevents unnecessary rudder actuation on straight segments
+        # by penalising heading deviation from the reference.  Surge velocity
+        # provides a direct gradient on the thruster chain, preventing the
+        # solver from getting stuck at zero RPM.
+        Q_diag = np.ones(8)
+        Q_diag[0] = 1000  # x-position
+        Q_diag[1] = 1000  # y-position
+        Q_diag[2] = 1000  # z-position
+        Q_diag[3:7] = 500  # quaternion (heading stability)
+        Q_diag[7] = 200   # surge velocity
         Q = np.diag(Q_diag)
 
         # Control rate of change weight matrix - control inputs as [x_vbs, x_lcg, delta_s, delta_r, rpm1, rpm2]
@@ -75,8 +51,8 @@ class NMPC:
         R_diag = np.ones(self.nu)
         R_diag[0] = 1e-2  # 1e-1        # VBS
         R_diag[1] = 1e-1  # LCG
-        R_diag[2] = 1e0     # stern angle
-        R_diag[3] = 1e0     # rudder angle
+        R_diag[2] = 1e2     # stern angle rate
+        R_diag[3] = 1e2     # rudder angle rate
         R_diag[4] = 1e-8  # RPM1 rate: reduced for faster thrust switching during maneuvers
         R_diag[5] = 1e-8  # RPM2 rate: reduced for faster thrust switching during maneuvers
         R = np.diag(R_diag)
@@ -90,26 +66,22 @@ class NMPC:
         # R_diag[4: ] = 1e-6
         # R = np.diag(R_diag)*1e-3
         
-        # Terminal Costs
-        # The terminal node (end of 3 s horizon) is what the MPC uses to plan final
-        # stops. Q_e_surge >> Q_e_pos means "be slow at the end of your horizon,
-        # even if you haven't quite reached the position target yet."
-        # With Q_e_surge = 1500 and Q_e_pos = 600:
-        #   equal cost at v = sqrt(600/1500) * e_pos ≈ 0.63 * e_pos
-        #   e.g. at 0.5 m from goal, velocity > 0.32 m/s costs more than the position.
-        Q_e_diag = np.ones(self.nx)
-        Q_e_diag[0] = 800   # x  (was 1000, matches stage)
-        Q_e_diag[1] = 800   # y  (was 1000, matches stage)
-        Q_e_diag[2] = 300   # z  (was  500, matches stage)
-        Q_e_diag[3:7] = 1 # quaternion — unchanged
-        Q_e_diag[7] = 3000.0 # surge velocity — was 1500 (2× increase; terminal stop strong)
-        Q_e_diag[8] = 0.01  # sway  — unchanged
-        Q_e_diag[9] = 500   # heave — raised from 5 (matches stage weight)
-        Q_e_diag[10:12] = 1 # roll/pitch rates — unchanged
-        Q_e_diag[12] = 10   # yaw rate — unchanged
-        Q_e_diag[13:17] = 1e-5 # vbs, lcg, stern, rudder — unchanged
-        Q_e_diag[17:19] = 5e-3 # rpm1, rpm2 — matches stage weight
-        Q_e = np.diag(Q_e_diag) # terminal cost
+        # Terminal cost — position + quaternion + velocity (drive to zero at goal).
+        # Velocity reference at the terminal node is 0, so Q_e penalises any
+        # remaining speed at the end of the horizon.  This, together with the
+        # braking/speed-funnel constraint, ensures the vehicle decelerates.
+        Q_e_diag = np.ones(13)
+        Q_e_diag[0] = 800    # x
+        Q_e_diag[1] = 800    # y
+        Q_e_diag[2] = 300    # z
+        Q_e_diag[3:7] = 1    # quaternion
+        Q_e_diag[7] = 3000.0 # surge velocity (u) -> 0
+        Q_e_diag[8] = 0.01   # sway  velocity (v)
+        Q_e_diag[9] = 500    # heave velocity (w)
+        Q_e_diag[10] = 1     # p (roll rate)
+        Q_e_diag[11] = 1     # q (pitch rate)
+        Q_e_diag[12] = 10    # r (yaw rate)
+        Q_e = np.diag(Q_e_diag)
 
         # Stage costs
         # Parameter vector layout: [state_ref (nx), control_ref (nu), goal_pos (3)]
@@ -118,9 +90,10 @@ class NMPC:
         self.model.p = ca.MX.sym("ref_param", self.nx + self.nu + 3, 1)
         self.ocp.parameter_values = np.zeros((self.nx + self.nu + 3,))
 
-        self.ocp.cost.yref = np.zeros(
-            (self.nx + self.nu,)
-        )  # Init ref point. The true references are declared in the controller for-loop
+        self.n_stage_cost = 8 + self.nu   # pos(3) + quat(4) + surge_vel(1) + rates(6) = 14
+        self.n_terminal_cost = 13          # pos(3) + quat(4) + vel(6)  = 13
+
+        self.ocp.cost.yref = np.zeros((self.n_stage_cost,))
         self.ocp.cost.cost_type = "NONLINEAR_LS"
         self.ocp.cost.W = ca.diagcat(Q, R).full()
         self.ocp.model.cost_y_expr = self.x_error(
@@ -129,11 +102,11 @@ class NMPC:
 
         # Terminal cost
         self.ocp.cost.cost_type_e = "NONLINEAR_LS"
-        self.ocp.cost.W_e = Q_e  
+        self.ocp.cost.W_e = Q_e
         self.ocp.model.cost_y_expr_e = self.x_error(
             self.model.x, self.model.u, self.ocp.model.p, terminal=True
         )
-        self.ocp.cost.yref_e = np.zeros((self.nx,))
+        self.ocp.cost.yref_e = np.zeros((self.n_terminal_cost,))
 
         # --------------------- Constraint Setup --------------------------
         vbs_dot = 200  # Maximum rate of change for the VBS
@@ -153,20 +126,11 @@ class NMPC:
         # --- position bounds (NED: z positive down) ---
         # Tank limits in meters
         x_min, x_max = 0.0, 8.0
-        y_min, y_max = -1.5, 1.5
+        y_min, y_max = -2.0, 2.0
         z_min, z_max = -0.5, 3.0
 
         pos_lbx = np.array([x_min, y_min, z_min])
         pos_ubx = np.array([x_max, y_max, z_max])
-
-        # --- velocity constraints
-        # Note, these are arbitrary guesses...
-        x_dot_min, x_dot_max = -5.0, 5.0
-        y_dot_min, y_dot_max = -2.0, 2.0
-        z_dot_min, z_dot_max = -2.0, 2.0
-
-        vel_lbx = np.array([x_dot_min, y_dot_min, z_dot_min])
-        vel_ubx = np.array([x_dot_max, y_dot_max, z_dot_max])
 
         # --- actuator state bounds for x[13:19] = [x_vbs, x_lcg, δs, δr, rpm1, rpm2] ---
         act_lbx = np.array([0.0, 0.0, -np.deg2rad(7), -np.deg2rad(7), -500.0, -500.0])
@@ -295,11 +259,7 @@ class NMPC:
         self.ocp.solver_options.sim_method_newton_iter = 2  # 3 default
 
         self.ocp.solver_options.nlp_solver_type = "SQP_RTI"
-        # self.ocp.solver_options.nlp_solver_type = 'SQP'
-        # self.ocp.solver_options.nlp_solver_type = 'SQP_WITH_FEASIBLE_QP'
-        # self.ocp.solver_options.search_direction_mode = 'BYRD_OMOJOKUN'
-        # self.ocp.solver_options.allow_direction_mode_switch_to_nominal = False
-        self.ocp.solver_options.nlp_solver_max_iter = 1  # 80
+        self.ocp.solver_options.nlp_solver_max_iter = 5
         self.ocp.solver_options.tol = (
             1e-6  # NLP tolerance. 1e-6 is default for tolerances
         )
@@ -308,7 +268,7 @@ class NMPC:
 
         self.ocp.solver_options.globalization = "MERIT_BACKTRACKING"
         # self.ocp.solver_options.regularize_method = 'NO_REGULARIZE'
-        self.ocp.solver_options.levenberg_marquardt = 1e-2
+        self.ocp.solver_options.levenberg_marquardt = 1e-4
         # self.ocp.solver_options.regularize_method = 'PROJECT'
 
         # Simulation object based on OCP model.
@@ -773,48 +733,39 @@ class NMPC:
 
     def x_error(self, x, u, ref, terminal):
         """
-        Calculates the state deviation.
+        Calculates the cost residual vector.
 
-        :param x: State vector
-        :param ref: Reference vector
-        :return: error vector
+        Stage  (terminal=False): [pos_error(3), q_att_error(4), surge_vel_error(1), u(6)] = 14
+            Position, quaternion, and surge velocity are tracked.  Quaternion
+            keeps the heading aligned with the reference, preventing unnecessary
+            rudder actuation.  Surge velocity gives the solver a direct gradient
+            to engage thrusters.  The rate-of-change u is penalised via R to
+            smooth actuation.
+
+        Terminal (terminal=True): [pos_error(3), q_att_error(4), vel_error(6)] = 13
+            Full velocity is included at the terminal node to drive the vehicle
+            to a stop at the correct heading.
         """
+        pos_error = x[:3] - ref[:3]
+
         q1 = ref[3:7]
         q1 = q1 / ca.norm_2(q1)
         q2 = x[3:7]
-        # Sice unit quaternion, quaternion inverse is equal to its conjugate
         q_conj = ca.vertcat(q2[0], -q2[1], -q2[2], -q2[3])
         q2 = q_conj / ca.norm_2(q2)
 
-        # q_error = q1 @ q2^-1
         q_w = q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] - q1[3] * q2[3]
         q_x = q1[0] * q2[1] + q1[1] * q2[0] + q1[2] * q2[3] - q1[3] * q2[2]
         q_y = q1[0] * q2[2] - q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1]
         q_z = q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0]
 
         q_error = ca.vertcat(q_w, q_x, q_y, q_z)
-
-        # Quaternion double-cover: q and -q represent same orientation.
-        # Choose the hemisphere that gives smaller rotation (q_w > 0).
-        # CRITICAL FIX: If q_w < 0, we're measuring the LONG way around (>90° error).
-        # Flip to the short path: -q represents same orientation but <90° error.
         q_error = ca.if_else(q_w < 0, -q_error, q_error)
-
-        # Make attitude error zero at perfect alignment:
-        # q_error = [1, 0, 0, 0] -> [0, 0, 0, 0]
         q_att_error = ca.vertcat(1.0 - q_error[0], q_error[1], q_error[2], q_error[3])
 
-        # NOTE: usually I'd have ref - state, the standard closed loop, i.e.
-        # Astroem 2019. Since this error is squared, it should work, too,
-        # Liniger 2014 uses it in their vanilla MPC formulation
-        # Also, since the error is squared in the cost, it doesn't matter
-        pos_error = x[:3] - ref[:3]
-        vel_error = x[7:13] - ref[7:13]
-        u_error = x[13:19] - ref[13:19]
-
-        # If the error for terminal cost is calculated, don't include delta_u
         if terminal:
-            x_error = ca.vertcat(pos_error, q_att_error, vel_error, u_error)
+            vel_error = x[7:13] - ref[7:13]
+            return ca.vertcat(pos_error, q_att_error, vel_error)
         else:
-            x_error = ca.vertcat(pos_error, q_att_error, vel_error, u_error, u)  
-        return x_error
+            surge_vel_error = x[7] - ref[7]
+            return ca.vertcat(pos_error, q_att_error, surge_vel_error, u)

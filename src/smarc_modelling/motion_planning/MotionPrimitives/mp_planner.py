@@ -122,7 +122,8 @@ class SAMPlanner():
         # Connect the two trees and optimize the inverted second tree waypoints
         N_hor = 30
         T_s = 0.1
-        optimized_waypoints, status = join_trees_optimization(array_waypoints, N_hor, T_s, False)
+        build = True
+        optimized_waypoints, status = join_trees_optimization(array_waypoints, N_hor, T_s, build)
 
         if status == 0:
             return optimized_waypoints, "trees_connected"
