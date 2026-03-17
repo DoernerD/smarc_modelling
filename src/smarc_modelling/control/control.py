@@ -103,7 +103,7 @@ class NMPC:
         vbs_dot = 200  # Maximum rate of change for the VBS
         lcg_dot = 50  # Maximum rate of change for the LCG
         tv_dot = 0.2  # Maximum rate of change for the thrust vectoring
-        delta_v_theta_max = 1.0  # Maximum progress speed (m/s arc-length)
+        delta_v_theta_max = 0.5  # Maximum progress speed (m/s arc-length)
 
         # Declare initial state
         self.ocp.constraints.x0 = np.zeros(
@@ -204,17 +204,41 @@ class NMPC:
         h_dz1 = t1**2 * (1.0 - t1**2)
         h_dz2 = t2**2 * (1.0 - t2**2)
 
-        # con_h layout: [brake_h(1), h_dz1(1), h_dz2(1)]
-        self.ocp.model.con_h_expr = ca.vertcat(brake_h, h_dz1, h_dz2)
-        self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9])
-        self.ocp.constraints.uh = np.array([ 0.0,  0.0,  0.0])
+        # ----- Track (tube) constraint ------------------------------------------------
+        # Keep the vehicle within a tube of radius r_track around the path.
+        # h_track = ||e_c||^2   (cross-track error squared, perpendicular to tangent)
+        # Bound:  0 <= h_track <= r_track^2   (upper bound set via uh)
+        #
+        # To tighten/loosen at runtime per stage k:
+        #   uh = solver.constraints_get(k, "uh")
+        #   uh[-1] = new_r ** 2
+        #   solver.constraints_set(k, "uh", uh)
+        h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
+        self.r_track = 0.25  # [m] default tube radius
+        self.IDX_TRACK = 3  # index of h_track inside con_h
+
+        # con_h layout: [brake_h(1), h_dz1(1), h_dz2(1), h_track(1)]
+        r_sq = self.r_track ** 2
+        #self.ocp.model.con_h_expr = ca.vertcat(brake_h, h_dz1, h_dz2, h_track)
+        #self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9, 0.0])
+        #self.ocp.constraints.uh = np.array([ 0.0,  0.0,  0.0, r_sq])
+        #self.ocp.constraints.idxsh = np.arange(4)
+        #n_sh = 4
+        self.ocp.model.con_h_expr = ca.vertcat(h_dz1, h_dz2, h_track)
+        self.ocp.constraints.lh = np.array([-1e9, -1e9, 0.0])
+        self.ocp.constraints.uh = np.array([ 0.0,  0.0, r_sq])
         self.ocp.constraints.idxsh = np.arange(3)
         n_sh = 3
 
-        # Terminal nonlinear constraint (same structure)
-        self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, h_dz1, h_dz2)
-        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9])
-        self.ocp.constraints.uh_e = np.array([ 0.0,  0.0,  0.0])
+        # Terminal nonlinear constraint (same structure + track)
+        #self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, h_dz1, h_dz2, h_track)
+        #self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9, 0.0])
+        #self.ocp.constraints.uh_e = np.array([ 0.0,  0.0,  0.0, r_sq])
+        #self.ocp.constraints.idxsh_e = np.arange(4)
+        #n_sh_e = 4
+        self.ocp.model.con_h_expr_e = ca.vertcat(h_dz1, h_dz2, h_track)
+        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, 0.0])
+        self.ocp.constraints.uh_e = np.array([ 0.0,  0.0, r_sq])
         self.ocp.constraints.idxsh_e = np.arange(3)
         n_sh_e = 3
 
@@ -232,17 +256,28 @@ class NMPC:
         # Position walls: 0.05m violation costs 1e6*0.0025 + 1e4*0.05 = 3000
         # per stage — overwhelms any RPM cost (450 at 300 RPM reference).
 
-        # Stage: [sbx(3), sh_brake(1), sh_dz(2)] = size 6
-        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz]
-        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz]
-        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz]
-        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz]
+        Z_track = 1e5   # quadratic penalty for track tube violation
+        z_track = 1e3   # linear   penalty for track tube violation
 
-        # Terminal: [sh_e_brake(1), sh_e_dz(2)] = size 3
-        self.ocp.cost.Zl_e = np.r_[Z_brake, Z_dz, Z_dz]
-        self.ocp.cost.Zu_e = np.r_[Z_brake, Z_dz, Z_dz]
-        self.ocp.cost.zl_e = np.r_[z_brake, z_dz, z_dz]
-        self.ocp.cost.zu_e = np.r_[z_brake, z_dz, z_dz]
+        # Stage: [sbx(3), sh_brake(1), sh_dz(2), sh_track(1)] = size 7
+        #self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track]
+        #self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track]
+        #self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track]
+        #self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track]
+        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_dz, Z_dz, Z_track]
+        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_dz, Z_dz, Z_track]
+        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_dz, z_dz, z_track]
+        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_dz, z_dz, z_track]
+
+        # Terminal: [sh_e_brake(1), sh_e_dz(2), sh_e_track(1)] = size 4
+        #self.ocp.cost.Zl_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track]
+        #self.ocp.cost.Zu_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track]
+        #self.ocp.cost.zl_e = np.r_[z_brake, z_dz, z_dz, z_track]
+        #self.ocp.cost.zu_e = np.r_[z_brake, z_dz, z_dz, z_track]
+        self.ocp.cost.Zl_e = np.r_[Z_dz, Z_dz, Z_track]
+        self.ocp.cost.Zu_e = np.r_[Z_dz, Z_dz, Z_track]
+        self.ocp.cost.zl_e = np.r_[z_dz, z_dz, z_track]
+        self.ocp.cost.zu_e = np.r_[z_dz, z_dz, z_track]
 
         # ----------------------- Solver Setup --------------------------
         # set prediction horizon
@@ -359,6 +394,7 @@ class NMPC:
 
         model.f_expl_expr = f_expl
         model.f_impl_expr = f_impl
+        model.e_c_vec = e_c_vec
 
         return model
 
@@ -398,6 +434,32 @@ class NMPC:
 
         return acados_ocp_solver, acados_integrator
 
+
+    def set_track_radius(self, solver, r_track, stages=None):
+        """
+        Dynamically change the track tube radius at runtime.
+
+        :param solver: AcadosOcpSolver instance
+        :param r_track: Tube radius in metres.  Scalar applies to all stages,
+                        or pass an array of length len(stages) for per-stage radii.
+        :param stages: Iterable of stage indices (0..N).  None = all stages.
+        """
+        if stages is None:
+            stages = range(self.N_horizon + 1)
+
+        r_sq = np.atleast_1d(np.asarray(r_track, dtype=float)) ** 2
+        broadcast = r_sq.size == 1
+
+        for i, k in enumerate(stages):
+            val = float(r_sq[0] if broadcast else r_sq[i])
+            if k < self.N_horizon:
+                uh = solver.constraints_get(k, "uh")
+                uh[self.IDX_TRACK] = val
+                solver.constraints_set(k, "uh", uh)
+            else:
+                uh_e = solver.constraints_get(k, "uh")
+                uh_e[self.IDX_TRACK] = val
+                solver.constraints_set(k, "uh", uh_e)
 
     def x_error(self, x, u, ref, terminal):
         """
