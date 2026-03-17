@@ -217,7 +217,7 @@ class NMPC:
         #   uh[-1] = new_r ** 2
         #   solver.constraints_set(k, "uh", uh)
         h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
-        self.r_track = 0.25  # [m] default tube radius
+        self.r_track = 1.0  # [m] default tube radius (was 0.5; widened for turns)
         self.IDX_TRACK = 2  # index of h_track inside con_h (after brake_h removal)
 
         # con_h layout: [brake_h(1), h_dz1(1), h_dz2(1), h_track(1)]
@@ -343,7 +343,7 @@ class NMPC:
         #   p[nx : nx+nu]       = control ref (nu = 7)
         #   p[nx+nu : nx+nu+3]  = goal_pos    (3)
         #   p[nx+nu+3 : nx+nu+6]= t_hat       (3)
-        #   p[nx+nu+6]          = theta_hat    (1)
+        #   p[nx+nu+6]          = theta_hat   (1)
         # Total = 21 + 7 + 3 + 3 + 1 = 35
         p_ref = p[:3]
         idx_t = x_sym.rows() + u_sym.rows() + 3   # skip ref_row + goal_pos
@@ -357,33 +357,55 @@ class NMPC:
         e_c_vec = pos_diff - e_l * t_hat
         
         
-        Q_diag = np.array([1000.0,  # contour x
-                           1000.0,  # contour y
-                           2000.0,  # Before depth tuning: 1000.0, contour z
-                           500.0,   # lag (along-track)
-                           10.0])   # v_theta (progress pull)
+        Q_diag = np.array([500.0,   # contour x (reduced from 1000 for turn flexibility)
+                           500.0,   # contour y (reduced from 1000 for turn flexibility)
+                           2000.0,  # contour z
+                           200.0,   # lag (along-track)
+                           50.0])   # progress reward weight
         Q = np.diag(Q_diag)
 
-        # Stage R: penalise physical actuator rates only (u[0:6]).
-        # v_theta (u[6]) is NOT included — its cost comes from Q_vt via yref.
-        R_diag = np.array([1e-3,   # VBS rate — low to allow aggressive depth changes
+        Q_heading = 1000.0  # heading alignment — must dominate contour for responsive turns
+        Q_sync    = 100.0   # v_theta-to-vehicle-velocity synchronization
+
+        R_diag = np.array([1e-2,   # VBS rate (was 1e-1; reduced for depth tracking)
                            1e-1,   # LCG rate
-                           1e0 , #Before depth tuning: 1e2,    # stern angle rate
-                           1e0, # Old: 1e2,    # rudder angle rate
+                           1e0,    # stern angle rate (was 1e1; reduced for responsive turns)
+                           1e0,    # rudder angle rate (was 1e1; reduced for responsive turns)
                            1e-8,   # RPM1 rate
                            1e-8,   # RPM2 rate
                            1e0])   # delta_v_theta rate
         R = np.diag(R_diag)
-        
+
+        # Vehicle forward axis from quaternion (first column of rotation matrix)
+        q0_s, q1_s, q2_s, q3_s = x[3], x[4], x[5], x[6]
+        fwd_x = 1 - 2 * (q2_s**2 + q3_s**2)
+        fwd_y = 2 * (q1_s * q2_s + q0_s * q3_s)
+        fwd_z = 2 * (q1_s * q3_s - q0_s * q2_s)
+        cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
+        e_heading = 1 - cos_align#**2 # NOTE: If you want to force the vehicle to face the path tangent forward, set e_heading = 1 - cos_align
+
+        # Surge velocity projected onto path tangent.  Couples v_theta to
+        # actual vehicle motion so the solver cannot advance theta without
+        # producing physical velocity (the root cause of the no-movement bug).
+        v_along = x[7] * cos_align
+        e_sync = x[self.N_PHYS_STATES + 1] - v_along   # v_theta - v_along
+
         cost = (
             e_c_vec.T @ Q[:3, :3] @ e_c_vec
             + e_l * Q[3, 3] * e_l
-            - Q[4, 4] * x[self.N_PHYS_STATES + 1]      # cost on v_theta
-            + u_sym[:6].T @ R[:6, :6] @ u_sym[:6]      # cost on physical actuator rates 
-            + u_sym[6]**2 * R[6, 6]                    # cost on delta_v_theta
+            + Q_heading * e_heading
+            + Q_sync * e_sync**2
+            - Q[4, 4] * x[self.N_PHYS_STATES + 1]
+            + u_sym[:6].T @ R[:6, :6] @ u_sym[:6]
+            + u_sym[6]**2 * R[6, 6]
         )
-        
-        cost_e = ( e_c_vec.T @ Q[:3, :3] @ e_c_vec + e_l * Q[3, 3] * e_l)
+
+        cost_e = (
+            e_c_vec.T @ Q[:3, :3] @ e_c_vec
+            + e_l * Q[3, 3] * e_l
+            + Q_heading * e_heading
+            + Q_sync * e_sync**2
+        )
 
 
         
