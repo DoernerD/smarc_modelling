@@ -102,7 +102,7 @@ class NMPC:
         # --------------------- Constraint Setup --------------------------
         vbs_dot = 200  # Maximum rate of change for the VBS
         lcg_dot = 50  # Maximum rate of change for the LCG
-        tv_dot = 0.2  # Maximum rate of change for the thrust vectoring
+        tv_dot = 0.5  # Maximum rate of change for the thrust vectoring (was 0.2; raised for faster turns)
         delta_v_theta_max = 0.5  # Maximum progress speed (m/s arc-length)
 
         # Declare initial state
@@ -369,8 +369,8 @@ class NMPC:
 
         R_diag = np.array([1e-2,   # VBS rate (was 1e-1; reduced for depth tracking)
                            1e-1,   # LCG rate
-                           1e0,    # stern angle rate (was 1e1; reduced for responsive turns)
-                           1e0,    # rudder angle rate (was 1e1; reduced for responsive turns)
+                           1e-1,   # stern angle rate
+                           1e-1,   # rudder angle rate (low penalty allows fast swing into turns)
                            1e-8,   # RPM1 rate
                            1e-8,   # RPM2 rate
                            1e0])   # delta_v_theta rate
