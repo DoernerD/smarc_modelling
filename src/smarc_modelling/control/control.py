@@ -110,8 +110,8 @@ class NMPC:
             (self.nx,)
         )  # Initial state is zero. This is set in the sim. for-loop
 
-        # Control bounds: physical actuator rates + v_theta (forward-only)
-        self.ocp.constraints.lbu = np.array([-vbs_dot, -lcg_dot, -tv_dot, -tv_dot, 0.0])
+        # Control bounds: physical actuator rates + delta_v_theta (allow deceleration)
+        self.ocp.constraints.lbu = np.array([-vbs_dot, -lcg_dot, -tv_dot, -tv_dot, -delta_v_theta_max])
         self.ocp.constraints.ubu = np.array([vbs_dot, lcg_dot, tv_dot, tv_dot, delta_v_theta_max])
         self.ocp.constraints.idxbu = np.array([0, 1, 2, 3, 6])
 
@@ -131,18 +131,21 @@ class NMPC:
         #theta_lbx = np.array([0.0])
         #theta_ubx = np.array([1e6])
 
-        #idxbx = np.r_[[0, 1, 2], [13, 14, 15, 16, 17, 18], [19]]  # 10 indices
-        idxbx = np.r_[[0, 1, 2], [13, 14, 15, 16, 17, 18]]  # 10 indices
-        #lbx = np.r_[pos_lbx, act_lbx, theta_lbx]
-        #ubx = np.r_[pos_ubx, act_ubx, theta_ubx]
-        lbx = np.r_[pos_lbx, act_lbx]
-        ubx = np.r_[pos_ubx, act_ubx]
+        # x[20] = v_theta (progress speed along path)
+        v_theta_max = 0.8  # m/s — slightly above SAM cruise to allow transient bursts
+        v_theta_lbx = np.array([0.0])
+        v_theta_ubx = np.array([v_theta_max])
+
+        idxbx = np.r_[[0, 1, 2], [13, 14, 15, 16, 17, 18], [20]]
+        lbx = np.r_[pos_lbx, act_lbx, v_theta_lbx]
+        ubx = np.r_[pos_ubx, act_ubx, v_theta_ubx]
 
         self.ocp.constraints.idxbx = idxbx
         self.ocp.constraints.lbx = lbx
         self.ocp.constraints.ubx = ubx
 
         # Soft constraints on position box bounds (first 3 entries in idxbx)
+        # v_theta bound (index 9 in idxbx) is kept hard — it must never exceed v_theta_max
         idxsbx = np.array([0, 1, 2])
         self.ocp.constraints.idxsbx = idxsbx
         n_sb = idxsbx.size  # 3
@@ -215,7 +218,7 @@ class NMPC:
         #   solver.constraints_set(k, "uh", uh)
         h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
         self.r_track = 0.25  # [m] default tube radius
-        self.IDX_TRACK = 3  # index of h_track inside con_h
+        self.IDX_TRACK = 2  # index of h_track inside con_h (after brake_h removal)
 
         # con_h layout: [brake_h(1), h_dz1(1), h_dz2(1), h_track(1)]
         r_sq = self.r_track ** 2
@@ -354,21 +357,22 @@ class NMPC:
         e_c_vec = pos_diff - e_l * t_hat
         
         
-        Q_diag = np.array([1000.0, 1000.0, 1000.0,   # contour (cross-track)
-                           500.0,                      # lag (along-track)
-                           #200.0,                      # heading alignment with path tangent
-                           10.0])                      # v_theta (progress pull)
+        Q_diag = np.array([1000.0,  # contour x
+                           1000.0,  # contour y
+                           2000.0,  # Before depth tuning: 1000.0, contour z
+                           500.0,   # lag (along-track)
+                           10.0])   # v_theta (progress pull)
         Q = np.diag(Q_diag)
 
         # Stage R: penalise physical actuator rates only (u[0:6]).
         # v_theta (u[6]) is NOT included — its cost comes from Q_vt via yref.
-        R_diag = np.array([1e-2,   # VBS rate
+        R_diag = np.array([1e-3,   # VBS rate — low to allow aggressive depth changes
                            1e-1,   # LCG rate
-                           1e2,    # stern angle rate
+                           1e0 , #Before depth tuning: 1e2,    # stern angle rate
                            1e0, # Old: 1e2,    # rudder angle rate
                            1e-8,   # RPM1 rate
                            1e-8,   # RPM2 rate
-                           1e0])  # delta_v_theta rate
+                           1e0])   # delta_v_theta rate
         R = np.diag(R_diag)
         
         cost = (
