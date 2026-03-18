@@ -38,24 +38,44 @@ class NMPC:
         # Terminal cost: position + quaternion + velocity tracking (unchanged).
         #
         # Residual layout
-        #   Stage:    [e_c_vec(3), e_l(1), e_heading(1), v_theta(1), u_phys(6)] = 12
+        #   Stage:    [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 14
         #   Terminal: [pos_error(3), q_att_error(4), vel_error(6)] = 13
 
         # Stage Q: contour(3) + lag(1) + heading(1) + v_theta(1) = 6
-        Q_diag = np.array([1000.0, 1000.0, 1000.0,   # contour (cross-track)
-                           500.0,                      # lag (along-track)
-                           200.0,                      # heading alignment with path tangent
-                           10.0])                      # v_theta (progress pull)
+        #Q_diag = np.array([1000.0, 1000.0, 1000.0,   # contour (cross-track)
+        #                   500.0,                      # lag (along-track)
+        #                   200.0,                      # heading alignment with path tangent
+        #                   10.0])                      # v_theta (progress pull)
+        #Q = np.diag(Q_diag)
+
+        ## Stage R: penalise physical actuator rates only (u[0:6]).
+        ## v_theta (u[6]) is NOT included — its cost comes from Q_vt via yref.
+        #R_diag = np.array([1e-2,   # VBS rate
+        #                   1e-1,   # LCG rate
+        #                   1e2,    # stern angle rate
+        #                   1e2,    # rudder angle rate
+        #                   1e-8,   # RPM1 rate
+        #                   1e-8])  # RPM2 rate
+        #R = np.diag(R_diag)
+        
+        
+        Q_diag = np.array([500.0,   # contour x (reduced from 1000 for turn flexibility)
+                           500.0,   # contour y (reduced from 1000 for turn flexibility)
+                           2000.0,  # contour z
+                           200.0,   # lag (along-track)
+                           50.0,    # progress reward weight
+                           1000.0,  # heading alignment — must dominate contour for responsive turns
+                           100.0])  # v_theta-to-vehicle-velocity synchronization
         Q = np.diag(Q_diag)
 
-        # Stage R: penalise physical actuator rates only (u[0:6]).
-        # v_theta (u[6]) is NOT included — its cost comes from Q_vt via yref.
-        R_diag = np.array([1e-2,   # VBS rate
+
+        R_diag = np.array([1e-2,   # VBS rate (was 1e-1; reduced for depth tracking)
                            1e-1,   # LCG rate
-                           1e2,    # stern angle rate
-                           1e2,    # rudder angle rate
+                           1e-1,   # stern angle rate
+                           1e-1,   # rudder angle rate (low penalty allows fast swing into turns)
                            1e-8,   # RPM1 rate
-                           1e-8])  # RPM2 rate
+                           1e-8,   # RPM2 rate
+                           1e0])   # delta_v_theta rate
         R = np.diag(R_diag)
 
         # Terminal cost — position + quaternion + velocity (unchanged)
@@ -72,32 +92,38 @@ class NMPC:
         Q_e_diag[12] = 10    # r (yaw rate)
         Q_e = np.diag(Q_e_diag)
 
+
         # Parameter vector layout:
         #   [state_ref(21), control_ref(7), goal_pos(3), t_hat(3), theta_hat(1)]
         # Total = nx + nu + 3 + 3 + 1 = 35
         n_params = self.nx + self.nu + 3 + 3 + 1
         self.ocp.parameter_values = np.zeros((n_params,))
 
-        self.n_stage_cost = 6 + self.N_PHYS_CONTROLS   # 6 + 6 = 12
-        self.n_terminal_cost = 13                        # pos(3) + quat(4) + vel(6)
+        # Declare the symbolic parameter vector so CasADi expressions can index it.
+        p_sym = ca.MX.sym("p", n_params)
+        self.model.p = p_sym
+
+        self.n_stage_cost = 7 + self.nu   # 7 MPCC residuals + 7 control rates = 14
+        self.n_terminal_cost = 13         # pos(3) + quat(4) + vel(6)
 
         # We have the cost defined in the model.
-        self.ocp.cost.cost_type = "EXTERNAL"
-        self.ocp.cost.cost_type_e = "EXTERNAL"
-        #self.ocp.cost.yref = np.zeros((self.n_stage_cost,))
-        #self.ocp.cost.cost_type = "NONLINEAR_LS"
-        #self.ocp.cost.W = ca.diagcat(Q, R).full()
+        self.ocp.cost.yref = np.zeros((self.n_stage_cost,))
+        self.ocp.cost.cost_type = "NONLINEAR_LS"
+        self.ocp.cost.W = ca.diagcat(Q, R).full()
+        self.ocp.model.cost_y_expr = self.compute_stage_cost(
+            self.model.x, self.model.u, self.model.p, terminal=False
+        )
         #self.ocp.model.cost_y_expr = self.x_error(
         #    self.model.x, self.model.u, self.model.p, terminal=False
         #)
 
         # Terminal cost
-        #self.ocp.cost.cost_type_e = "NONLINEAR_LS"
-        #self.ocp.cost.W_e = Q_e
-        #self.ocp.model.cost_y_expr_e = self.x_error(
-        #    self.model.x, self.model.u, self.ocp.model.p, terminal=True
-        #)
-        #self.ocp.cost.yref_e = np.zeros((self.n_terminal_cost,))
+        self.ocp.cost.cost_type_e = "NONLINEAR_LS"
+        self.ocp.cost.W_e = Q_e
+        self.ocp.model.cost_y_expr_e = self.compute_stage_cost(
+            self.model.x, self.model.u, self.ocp.model.p, terminal=True
+        )
+        self.ocp.cost.yref_e = np.zeros((self.n_terminal_cost,))
 
         # --------------------- Constraint Setup --------------------------
         vbs_dot = 200  # Maximum rate of change for the VBS
@@ -216,6 +242,20 @@ class NMPC:
         #   uh = solver.constraints_get(k, "uh")
         #   uh[-1] = new_r ** 2
         #   solver.constraints_set(k, "uh", uh)
+
+        # Compute e_c_vec symbolically from model state and parameters (same
+        # path geometry as the stage cost) so the track constraint shares the
+        # same linearization point as the cost.
+        _idx_t = self.nx + self.nu + 3
+        _t_hat = self.model.p[_idx_t : _idx_t + 3]
+        _theta_hat = self.model.p[_idx_t + 3]
+        _theta = self.model.x[self.N_PHYS_STATES]
+        _p_ref = self.model.p[:3]
+        _path_pos = _p_ref + _t_hat * (_theta - _theta_hat)
+        _pos_diff = self.model.x[:3] - _path_pos
+        _e_l = ca.dot(_pos_diff, _t_hat)
+        self.model.e_c_vec = _pos_diff - _e_l * _t_hat
+
         h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
         self.r_track = 1.0  # [m] default tube radius (was 0.5; widened for turns)
         self.IDX_TRACK = 2  # index of h_track inside con_h (after brake_h removal)
@@ -294,7 +334,7 @@ class NMPC:
         self.ocp.solver_options.sim_method_newton_iter = 2  # 3 default
 
         self.ocp.solver_options.nlp_solver_type = "SQP_RTI"
-        self.ocp.solver_options.nlp_solver_max_iter = 5
+        self.ocp.solver_options.nlp_solver_max_iter = 1
         self.ocp.solver_options.tol = (
             1e-6  # NLP tolerance. 1e-6 is default for tolerances
         )
@@ -325,10 +365,6 @@ class NMPC:
         u_sym = ca.MX.sym("u_sym", self.N_PHYS_CONTROLS + 1, 1)
         x_dot_sym = ca.MX.sym("x_dot", self.N_PHYS_STATES + 2, 1)
 
-        p = ca.MX.sym("p", 35, 1)
-        ref = p
-        x = x_sym
-
         x_dot = casadi_model.dynamics(export=True)
         f_expl = ca.vertcat(
             x_dot(x_sym[:13], x_sym[13:19]),   # 13 physical state derivatives
@@ -338,89 +374,15 @@ class NMPC:
         )
         f_impl = x_dot_sym - f_expl
         
-        # p vector layout (set in DiveControllerMPC.update):
-        #   p[0 : nx]           = state ref   (nx = 21)
-        #   p[nx : nx+nu]       = control ref (nu = 7)
-        #   p[nx+nu : nx+nu+3]  = goal_pos    (3)
-        #   p[nx+nu+3 : nx+nu+6]= t_hat       (3)
-        #   p[nx+nu+6]          = theta_hat   (1)
-        # Total = 21 + 7 + 3 + 3 + 1 = 35
-        p_ref = p[:3]
-        idx_t = x_sym.rows() + u_sym.rows() + 3   # skip ref_row + goal_pos
-        t_hat = p[idx_t : idx_t + 3]
-        theta_hat = p[idx_t + 3]
-        theta = x[self.N_PHYS_STATES]          # x[19]
-
-        path_pos = p_ref + t_hat * (theta - theta_hat)
-        pos_diff = x[:3] - path_pos
-        e_l = ca.dot(pos_diff, t_hat)
-        e_c_vec = pos_diff - e_l * t_hat
-        
-        
-        Q_diag = np.array([500.0,   # contour x (reduced from 1000 for turn flexibility)
-                           500.0,   # contour y (reduced from 1000 for turn flexibility)
-                           2000.0,  # contour z
-                           200.0,   # lag (along-track)
-                           50.0])   # progress reward weight
-        Q = np.diag(Q_diag)
-
-        Q_heading = 1000.0  # heading alignment — must dominate contour for responsive turns
-        Q_sync    = 100.0   # v_theta-to-vehicle-velocity synchronization
-
-        R_diag = np.array([1e-2,   # VBS rate (was 1e-1; reduced for depth tracking)
-                           1e-1,   # LCG rate
-                           1e-1,   # stern angle rate
-                           1e-1,   # rudder angle rate (low penalty allows fast swing into turns)
-                           1e-8,   # RPM1 rate
-                           1e-8,   # RPM2 rate
-                           1e0])   # delta_v_theta rate
-        R = np.diag(R_diag)
-
-        # Vehicle forward axis from quaternion (first column of rotation matrix)
-        q0_s, q1_s, q2_s, q3_s = x[3], x[4], x[5], x[6]
-        fwd_x = 1 - 2 * (q2_s**2 + q3_s**2)
-        fwd_y = 2 * (q1_s * q2_s + q0_s * q3_s)
-        fwd_z = 2 * (q1_s * q3_s - q0_s * q2_s)
-        cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
-        e_heading = 1 - cos_align#**2 # NOTE: If you want to force the vehicle to face the path tangent forward, set e_heading = 1 - cos_align
-
-        # Surge velocity projected onto path tangent.  Couples v_theta to
-        # actual vehicle motion so the solver cannot advance theta without
-        # producing physical velocity (the root cause of the no-movement bug).
-        v_along = x[7] * cos_align
-        e_sync = x[self.N_PHYS_STATES + 1] - v_along   # v_theta - v_along
-
-        cost = (
-            e_c_vec.T @ Q[:3, :3] @ e_c_vec
-            + e_l * Q[3, 3] * e_l
-            + Q_heading * e_heading
-            + Q_sync * e_sync**2
-            - Q[4, 4] * x[self.N_PHYS_STATES + 1]
-            + u_sym[:6].T @ R[:6, :6] @ u_sym[:6]
-            + u_sym[6]**2 * R[6, 6]
-        )
-
-        cost_e = (
-            e_c_vec.T @ Q[:3, :3] @ e_c_vec
-            + e_l * Q[3, 3] * e_l
-            + Q_heading * e_heading
-            + Q_sync * e_sync**2
-        )
-
-
         
         model = AcadosModel()
         model.name = "SAM_equation_system"
         model.x = x_sym
         model.xdot = x_dot_sym
         model.u = u_sym
-        model.p = p
-        model.cost_expr_ext_cost = cost
-        model.cost_expr_ext_cost_e = cost_e
 
         model.f_expl_expr = f_expl
         model.f_impl_expr = f_impl
-        model.e_c_vec = e_c_vec
 
         return model
 
@@ -486,6 +448,82 @@ class NMPC:
                 uh_e = solver.constraints_get(k, "uh")
                 uh_e[self.IDX_TRACK] = val
                 solver.constraints_set(k, "uh", uh_e)
+                
+    def compute_stage_cost(self, x, u, p, terminal):
+        """
+        Compute the stage or terminal cost residual.
+
+        Stage  (terminal=False):
+          [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 14
+          v_theta is the raw progress speed — set yref[4] = v_target for the progress reward.
+
+        Terminal (terminal=True):
+          [pos_error(3), q_att_error(4), vel_error(6)] = 13
+          Position + attitude + velocity tracking to the terminal reference.
+
+        p vector layout (set in DiveControllerMPC.update):
+          p[0 : nx]            = state ref   (nx = 21)
+          p[nx : nx+nu]        = control ref (nu = 7)
+          p[nx+nu : nx+nu+3]   = goal_pos    (3)
+          p[nx+nu+3 : nx+nu+6] = t_hat       (3)
+          p[nx+nu+6]           = theta_hat   (1)
+          Total = 21 + 7 + 3 + 3 + 1 = 35
+        """
+        if terminal:
+            pos_error = x[:3] - p[:3]
+
+            q1 = p[3:7]
+            q1 = q1 / ca.norm_2(q1)
+            q2 = x[3:7]
+            q_conj = ca.vertcat(q2[0], -q2[1], -q2[2], -q2[3])
+            q2 = q_conj / ca.norm_2(q2)
+
+            q_w = q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] - q1[3] * q2[3]
+            q_x = q1[0] * q2[1] + q1[1] * q2[0] + q1[2] * q2[3] - q1[3] * q2[2]
+            q_y = q1[0] * q2[2] - q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1]
+            q_z = q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0]
+
+            q_error = ca.vertcat(q_w, q_x, q_y, q_z)
+            q_error = ca.if_else(q_w < 0, -q_error, q_error)
+            q_att_error = ca.vertcat(
+                1.0 - q_error[0], q_error[1], q_error[2], q_error[3]
+            )
+            vel_error = x[7:13] - p[7:13]
+            return ca.vertcat(pos_error, q_att_error, vel_error)
+
+        # ---- MPCC stage cost ----
+        p_ref = p[:3]
+        idx_t = x.rows() + u.rows() + 3   # skip ref_row + goal_pos
+        t_hat = p[idx_t : idx_t + 3]
+        theta_hat = p[idx_t + 3]
+        theta = x[self.N_PHYS_STATES]          # x[19]
+
+        path_pos = p_ref + t_hat * (theta - theta_hat)
+        pos_diff = x[:3] - path_pos
+        e_l = ca.dot(pos_diff, t_hat)
+        e_c_vec = pos_diff - e_l * t_hat
+
+        # Vehicle forward axis from quaternion (first column of rotation matrix)
+        q0_s, q1_s, q2_s, q3_s = x[3], x[4], x[5], x[6]
+        fwd_x = 1 - 2 * (q2_s**2 + q3_s**2)
+        fwd_y = 2 * (q1_s * q2_s + q0_s * q3_s)
+        fwd_z = 2 * (q1_s * q3_s - q0_s * q2_s)
+        cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
+        e_heading = 1 - cos_align
+
+        # v_theta: set yref[4] = v_target to pull progress speed toward v_target.
+        v_theta = x[self.N_PHYS_STATES + 1]   # x[20]
+
+        # Surge velocity projected onto path tangent.  Couples v_theta to
+        # actual vehicle motion so the solver cannot advance theta without
+        # producing physical velocity (the root cause of the no-movement bug).
+        v_along = x[7] * cos_align
+        e_sync = v_theta - v_along
+
+        return ca.vertcat(
+            e_c_vec, e_l, v_theta, e_heading, e_sync,
+            u[:self.N_PHYS_CONTROLS], u[self.N_PHYS_CONTROLS],
+        )
 
     def x_error(self, x, u, ref, terminal):
         """
