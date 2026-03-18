@@ -202,7 +202,7 @@ class NMPC:
         # d_eps: distance offset so the allowed speed does not collapse to 0 exactly
         #   at the goal (avoids fighting the position cost near the goal).
         #   Should match final_pos_tolerance in the controller (≈ 0.5 m).
-        a_brake = 0.005  # m/s^2  — was 0.10; tightened to match real SAM capability
+        a_brake = 0.001  # m/s^2  — was 0.10; tightened to match real SAM capability
         d_eps   = 0.5   # m      — was 1.5; reduced to match final_pos_tolerance
 
         x_goal = self.model.p[self.nx + self.nu + 0]
@@ -240,7 +240,7 @@ class NMPC:
         # into active braking territory, regardless of which direction the AUV is
         # approaching from.
         rpm_deadzone  = 200.0   # [RPM] deadzone on real SAM thrusters
-        d_rpm_trigger = 1.0     # [m]   distance at which RPM cap starts tightening
+        d_rpm_trigger = 2.0     # [m]   distance at which RPM cap starts tightening
         rpm_max_val   = act_ubx[4]  # 450 RPM — matches the state box constraint
 
         rpm_mag = (rpm_max_val + rpm_deadzone) * ca.fmin(
