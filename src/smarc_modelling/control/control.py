@@ -158,7 +158,7 @@ class NMPC:
         #theta_ubx = np.array([1e6])
 
         # x[20] = v_theta (progress speed along path)
-        v_theta_max = 0.8  # m/s — slightly above SAM cruise to allow transient bursts
+        v_theta_max = 0.6  # m/s — must be >= v_near in reference propagation (was 0.4)
         v_theta_lbx = np.array([0.0])
         v_theta_ubx = np.array([v_theta_max])
 
@@ -192,7 +192,7 @@ class NMPC:
         #   0.5 m → 0.39 m/s,  1 m → 0.49 m/s,  2 m → 0.63 m/s,  4 m → 0.87 m/s
         # The funnel only meaningfully limits speed within ~0.5 m of the goal,
         # which is what we want for trajectory following with end-stop braking.
-        a_brake = 0.1   # m/s^2  (was 0.005 — 20× increase for trajectory following)
+        a_brake = 0.001 # Sim break: 0.1   # m/s^2  (was 0.005 — 20× increase for trajectory following)
         d_eps   = 0.75  # m      (was 0.5 — matches final_pos_tolerance)
 
         x_goal = self.model.p[self.nx + self.nu + 0]
@@ -262,65 +262,71 @@ class NMPC:
 
         # con_h layout: [brake_h(1), h_dz1(1), h_dz2(1), h_track(1)]
         r_sq = self.r_track ** 2
-        #self.ocp.model.con_h_expr = ca.vertcat(brake_h, h_dz1, h_dz2, h_track)
-        #self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9, 0.0])
-        #self.ocp.constraints.uh = np.array([ 0.0,  0.0,  0.0, r_sq])
-        #self.ocp.constraints.idxsh = np.arange(4)
-        #n_sh = 4
-        self.ocp.model.con_h_expr = ca.vertcat(h_dz1, h_dz2, h_track)
-        self.ocp.constraints.lh = np.array([-1e9, -1e9, 0.0])
-        self.ocp.constraints.uh = np.array([ 0.0,  0.0, r_sq])
-        self.ocp.constraints.idxsh = np.arange(3)
-        n_sh = 3
+        self.ocp.model.con_h_expr = ca.vertcat(brake_h, h_dz1, h_dz2, h_track)
+        self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9, 0.0])
+        self.ocp.constraints.uh = np.array([ 0.0,  0.0,  0.0, r_sq])
+        self.ocp.constraints.idxsh = np.arange(4)
+        n_sh = 4
+        #self.ocp.model.con_h_expr = ca.vertcat(h_dz1, h_dz2, h_track)
+        #self.ocp.constraints.lh = np.array([-1e9, -1e9, 0.0])
+        #self.ocp.constraints.uh = np.array([ 0.0,  0.0, r_sq])
+        #self.ocp.constraints.idxsh = np.arange(3)
+        #n_sh = 3
 
         # Terminal nonlinear constraint (same structure + track)
-        #self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, h_dz1, h_dz2, h_track)
-        #self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9, 0.0])
-        #self.ocp.constraints.uh_e = np.array([ 0.0,  0.0,  0.0, r_sq])
-        #self.ocp.constraints.idxsh_e = np.arange(4)
-        #n_sh_e = 4
-        self.ocp.model.con_h_expr_e = ca.vertcat(h_dz1, h_dz2, h_track)
-        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, 0.0])
-        self.ocp.constraints.uh_e = np.array([ 0.0,  0.0, r_sq])
-        self.ocp.constraints.idxsh_e = np.arange(3)
-        n_sh_e = 3
+        self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, h_dz1, h_dz2, h_track)
+        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9, 0.0])
+        self.ocp.constraints.uh_e = np.array([ 0.0,  0.0,  0.0, r_sq])
+        self.ocp.constraints.idxsh_e = np.arange(4)
+        n_sh_e = 4
+        #self.ocp.model.con_h_expr_e = ca.vertcat(h_dz1, h_dz2, h_track)
+        #self.ocp.constraints.lh_e = np.array([-1e9, -1e9, 0.0])
+        #self.ocp.constraints.uh_e = np.array([ 0.0,  0.0, r_sq])
+        #self.ocp.constraints.idxsh_e = np.arange(3)
+        #n_sh_e = 3
 
         # ----- Unified slack penalty vectors ------------------------------------
         # acados orders slack variables as: [idxsbx | idxsh] for stage costs.
         # Terminal stage only has idxsh_e.
         Z_pos   = 1e6   # quadratic penalty for position box violations (hard wall)
         z_pos   = 1e4   # linear   penalty for position box violations
-        Z_brake = 1e3   # quadratic penalty for braking funnel violations
-        z_brake = 1e1   # linear   penalty for braking funnel violations
+
+        # Brake penalty sizing: with a_brake = 0.001 the constraint is
+        # permanently violated at any cruise speed (brake_h ≈ 0.03–0.09).
+        # The penalty must be LOW so the permanent violation doesn't corrupt
+        # the QP gradient — otherwise the brake gradient (reduce speed) fights
+        # the MPCC progress gradient (increase speed) and causes QP failure
+        # under SQP_RTI.  With Z=1, z=0.1 the per-stage penalty is < 0.02,
+        # negligible vs the tracking cost (~500).  The constraint still
+        # provides a gentle nudge to slow down near the goal.
+        Z_brake = 1.0   # quadratic penalty for braking funnel violations
+        z_brake = 0.1   # linear   penalty for braking funnel violations
+
         Z_dz    = 200.0 # quadratic penalty for RPM deadzone
         z_dz    = 20.0  # linear   penalty for RPM deadzone
-        # Complementarity penalty sizing: max violation h=0.25 at |rpm|=141,
-        # giving peak penalty = Z_dz*0.0625 + z_dz*0.25 = 17.5.
-        # Position walls: 0.05m violation costs 1e6*0.0025 + 1e4*0.05 = 3000
-        # per stage — overwhelms any RPM cost (450 at 300 RPM reference).
 
         Z_track = 1e5   # quadratic penalty for track tube violation
         z_track = 1e3   # linear   penalty for track tube violation
 
         # Stage: [sbx(3), sh_brake(1), sh_dz(2), sh_track(1)] = size 7
-        #self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track]
-        #self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track]
-        #self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track]
-        #self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track]
-        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_dz, Z_dz, Z_track]
-        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_dz, Z_dz, Z_track]
-        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_dz, z_dz, z_track]
-        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_dz, z_dz, z_track]
+        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track]
+        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track]
+        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track]
+        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track]
+        #self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_dz, Z_dz, Z_track]
+        #self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_dz, Z_dz, Z_track]
+        #self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_dz, z_dz, z_track]
+        #self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_dz, z_dz, z_track]
 
         # Terminal: [sh_e_brake(1), sh_e_dz(2), sh_e_track(1)] = size 4
-        #self.ocp.cost.Zl_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track]
-        #self.ocp.cost.Zu_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track]
-        #self.ocp.cost.zl_e = np.r_[z_brake, z_dz, z_dz, z_track]
-        #self.ocp.cost.zu_e = np.r_[z_brake, z_dz, z_dz, z_track]
-        self.ocp.cost.Zl_e = np.r_[Z_dz, Z_dz, Z_track]
-        self.ocp.cost.Zu_e = np.r_[Z_dz, Z_dz, Z_track]
-        self.ocp.cost.zl_e = np.r_[z_dz, z_dz, z_track]
-        self.ocp.cost.zu_e = np.r_[z_dz, z_dz, z_track]
+        self.ocp.cost.Zl_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track]
+        self.ocp.cost.Zu_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track]
+        self.ocp.cost.zl_e = np.r_[z_brake, z_dz, z_dz, z_track]
+        self.ocp.cost.zu_e = np.r_[z_brake, z_dz, z_dz, z_track]
+        #self.ocp.cost.Zl_e = np.r_[Z_dz, Z_dz, Z_track]
+        #self.ocp.cost.Zu_e = np.r_[Z_dz, Z_dz, Z_track]
+        #self.ocp.cost.zl_e = np.r_[z_dz, z_dz, z_track]
+        #self.ocp.cost.zu_e = np.r_[z_dz, z_dz, z_track]
 
         # ----------------------- Solver Setup --------------------------
         # set prediction horizon
