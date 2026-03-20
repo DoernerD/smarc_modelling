@@ -38,8 +38,8 @@ class NMPC:
         # Terminal cost: position + quaternion + velocity tracking (unchanged).
         #
         # Residual layout
-        #   Stage:    [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 14
-        #   Terminal: [pos_error(3), q_att_error(4), vel_error(6)] = 13
+        #   Stage:    [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 15
+        #   Terminal: [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), heave_vel(1)] = 9
 
         # Stage Q: contour(3) + lag(1) + heading(1) + v_theta(1) = 6
         #Q_diag = np.array([1000.0, 1000.0, 1000.0,   # contour (cross-track)
@@ -64,12 +64,13 @@ class NMPC:
                            2000.0,  # contour z
                            200.0,   # lag (along-track)
                            50.0,    # progress reward weight
-                           1000.0,  # heading alignment — must dominate contour for responsive turns
+                           1000.0,  # heading alignment (1-cos: drives yaw turns)
+                           200.0,   # pitch alignment (sin: drives trim recovery)
                            100.0])  # v_theta-to-vehicle-velocity synchronization
         Q = np.diag(Q_diag)
 
 
-        R_diag = np.array([1e-2,   # VBS rate (was 1e-1; reduced for depth tracking)
+        R_diag = np.array([5e-2,   # VBS rate (increased to smooth out VBS actuation)
                            1e-1,   # LCG rate
                            1e-1,   # stern angle rate
                            1e-1,   # rudder angle rate (low penalty allows fast swing into turns)
@@ -103,8 +104,8 @@ class NMPC:
         p_sym = ca.MX.sym("p", n_params)
         self.model.p = p_sym
 
-        self.n_stage_cost = 7 + self.nu   # 7 MPCC residuals + 7 control rates = 14
-        self.n_terminal_cost = 13         # pos(3) + quat(4) + vel(6)
+        self.n_stage_cost = 8 + self.nu   # 8 MPCC residuals + 7 control rates = 15
+        self.n_terminal_cost = 8 + 1       # 8 MPCC residuals + heave velocity
 
         # We have the cost defined in the model.
         self.ocp.cost.yref = np.zeros((self.n_stage_cost,))
@@ -113,13 +114,13 @@ class NMPC:
         self.ocp.model.cost_y_expr = self.compute_stage_cost(
             self.model.x, self.model.u, self.model.p, terminal=False
         )
-        #self.ocp.model.cost_y_expr = self.x_error(
-        #    self.model.x, self.model.u, self.model.p, terminal=False
-        #)
 
-        # Terminal cost
+        # Terminal cost: MPCC tracking + heave velocity damping to prevent
+        # depth overshoot.  No surge penalty (braking constraint handles that).
+        # Weight is moderate so it doesn't dominate the MPCC gradient.
+        w_heave = 200.0
         self.ocp.cost.cost_type_e = "NONLINEAR_LS"
-        self.ocp.cost.W_e = Q_e
+        self.ocp.cost.W_e = ca.diagcat(Q, np.diag([w_heave])).full()
         self.ocp.model.cost_y_expr_e = self.compute_stage_cost(
             self.model.x, self.model.u, self.ocp.model.p, terminal=True
         )
@@ -460,12 +461,10 @@ class NMPC:
         Compute the stage or terminal cost residual.
 
         Stage  (terminal=False):
-          [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 14
-          v_theta is the raw progress speed — set yref[4] = v_target for the progress reward.
+          [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 15
 
         Terminal (terminal=True):
-          [pos_error(3), q_att_error(4), vel_error(6)] = 13
-          Position + attitude + velocity tracking to the terminal reference.
+          [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), heave_vel(1)] = 9
 
         p vector layout (set in DiveControllerMPC.update):
           p[0 : nx]            = state ref   (nx = 21)
@@ -475,27 +474,27 @@ class NMPC:
           p[nx+nu+6]           = theta_hat   (1)
           Total = 21 + 7 + 3 + 3 + 1 = 35
         """
-        if terminal:
-            pos_error = x[:3] - p[:3]
+        #if terminal:
+        #    pos_error = x[:3] - p[:3]
 
-            q1 = p[3:7]
-            q1 = q1 / ca.norm_2(q1)
-            q2 = x[3:7]
-            q_conj = ca.vertcat(q2[0], -q2[1], -q2[2], -q2[3])
-            q2 = q_conj / ca.norm_2(q2)
+        #    q1 = p[3:7]
+        #    q1 = q1 / ca.norm_2(q1)
+        #    q2 = x[3:7]
+        #    q_conj = ca.vertcat(q2[0], -q2[1], -q2[2], -q2[3])
+        #    q2 = q_conj / ca.norm_2(q2)
 
-            q_w = q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] - q1[3] * q2[3]
-            q_x = q1[0] * q2[1] + q1[1] * q2[0] + q1[2] * q2[3] - q1[3] * q2[2]
-            q_y = q1[0] * q2[2] - q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1]
-            q_z = q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0]
+        #    q_w = q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] - q1[3] * q2[3]
+        #    q_x = q1[0] * q2[1] + q1[1] * q2[0] + q1[2] * q2[3] - q1[3] * q2[2]
+        #    q_y = q1[0] * q2[2] - q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1]
+        #    q_z = q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0]
 
-            q_error = ca.vertcat(q_w, q_x, q_y, q_z)
-            q_error = ca.if_else(q_w < 0, -q_error, q_error)
-            q_att_error = ca.vertcat(
-                1.0 - q_error[0], q_error[1], q_error[2], q_error[3]
-            )
-            vel_error = x[7:13] - p[7:13]
-            return ca.vertcat(pos_error, q_att_error, vel_error)
+        #    q_error = ca.vertcat(q_w, q_x, q_y, q_z)
+        #    q_error = ca.if_else(q_w < 0, -q_error, q_error)
+        #    q_att_error = ca.vertcat(
+        #        1.0 - q_error[0], q_error[1], q_error[2], q_error[3]
+        #    )
+        #    vel_error = x[7:13] - p[7:13]
+        #    return ca.vertcat(pos_error, q_att_error, vel_error)
 
         # ---- MPCC stage cost ----
         p_ref = p[:3]
@@ -517,6 +516,13 @@ class NMPC:
         cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
         e_heading = 1 - cos_align
 
+        # Pitch alignment: sin(pitch_state) - sin(pitch_ref).
+        # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), smooth polynomial in quaternion.
+        # sin(pitch_ref) = -t_hat[2] (from the path tangent).
+        # Unlike 1-cos (quartic near zero), this has a LINEAR gradient for
+        # small pitch errors, giving the solver real incentive to level out.
+        e_pitch = (-fwd_z) - (-t_hat[2])
+
         # v_theta: set yref[4] = v_target to pull progress speed toward v_target.
         v_theta = x[self.N_PHYS_STATES + 1]   # x[20]
 
@@ -526,10 +532,16 @@ class NMPC:
         v_along = x[7] * cos_align
         e_sync = v_theta - v_along
 
-        return ca.vertcat(
-            e_c_vec, e_l, v_theta, e_heading, e_sync,
-            u[:self.N_PHYS_CONTROLS], u[self.N_PHYS_CONTROLS],
-        )
+        if terminal:
+            return ca.vertcat(
+                e_c_vec, e_l, v_theta, e_heading, e_pitch, e_sync,
+                x[9],   # heave velocity (prevent depth overshoot)
+            )
+        else:
+            return ca.vertcat(
+                e_c_vec, e_l, v_theta, e_heading, e_pitch, e_sync,
+                u[:self.N_PHYS_CONTROLS], u[self.N_PHYS_CONTROLS],
+            )
 
     def x_error(self, x, u, ref, terminal):
         """
