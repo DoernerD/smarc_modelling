@@ -39,7 +39,7 @@ class NMPC:
         #
         # Residual layout
         #   Stage:    [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 15
-        #   Terminal: [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), heave_vel(1)] = 9
+        #   Terminal: [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1)] = 8
 
         # Stage Q: contour(3) + lag(1) + heading(1) + v_theta(1) = 6
         #Q_diag = np.array([1000.0, 1000.0, 1000.0,   # contour (cross-track)
@@ -61,17 +61,17 @@ class NMPC:
         
         Q_diag = np.array([500.0,   # contour x (reduced from 1000 for turn flexibility)
                            500.0,   # contour y (reduced from 1000 for turn flexibility)
-                           2000.0,  # contour z
-                           200.0,   # lag (along-track)
-                           50.0,    # progress reward weight
+                           1000.0,  # contour z (reduced from 2000: high z weight causes aggressive dive-then-overshoot)
+                           300.0,   # lag (along-track; controls overshoot on level segments)
+                           100.0,   # progress speed penalty (higher = slower cruise)
                            1000.0,  # heading alignment (1-cos: drives yaw turns)
-                           200.0,   # pitch alignment (sin: drives trim recovery)
-                           100.0])  # v_theta-to-vehicle-velocity synchronization
+                           800.0,   # pitch alignment (sin: drives trim recovery)
+                           400.0])  # v_theta-to-vehicle-velocity synchronization
         Q = np.diag(Q_diag)
 
 
         R_diag = np.array([5e-2,   # VBS rate (increased to smooth out VBS actuation)
-                           1e-1,   # LCG rate
+                           1e-2,   # LCG rate (low: LCG is the primary pitch actuator)
                            1e-1,   # stern angle rate
                            1e-1,   # rudder angle rate (low penalty allows fast swing into turns)
                            1e-8,   # RPM1 rate
@@ -115,10 +115,10 @@ class NMPC:
             self.model.x, self.model.u, self.model.p, terminal=False
         )
 
-        # Terminal cost: MPCC tracking + heave velocity damping to prevent
-        # depth overshoot.  No surge penalty (braking constraint handles that).
-        # Weight is moderate so it doesn't dominate the MPCC gradient.
-        w_heave = 200.0
+        # Terminal cost: MPCC tracking + heave velocity damping.
+        # Penalizes residual downward velocity at the end of the horizon to
+        # discourage momentum build-up during dives.
+        w_heave = 50.0
         self.ocp.cost.cost_type_e = "NONLINEAR_LS"
         self.ocp.cost.W_e = ca.diagcat(Q, np.diag([w_heave])).full()
         self.ocp.model.cost_y_expr_e = self.compute_stage_cost(
@@ -159,7 +159,7 @@ class NMPC:
         #theta_ubx = np.array([1e6])
 
         # x[20] = v_theta (progress speed along path)
-        v_theta_max = 0.6  # m/s — must be >= v_near in reference propagation (was 0.4)
+        v_theta_max = 0.3  # m/s — implicit speed ceiling via e_sync coupling
         v_theta_lbx = np.array([0.0])
         v_theta_ubx = np.array([v_theta_max])
 
@@ -193,7 +193,7 @@ class NMPC:
         #   0.5 m → 0.39 m/s,  1 m → 0.49 m/s,  2 m → 0.63 m/s,  4 m → 0.87 m/s
         # The funnel only meaningfully limits speed within ~0.5 m of the goal,
         # which is what we want for trajectory following with end-stop braking.
-        a_brake = 0.001 # Sim break: 0.1   # m/s^2  (was 0.005 — 20× increase for trajectory following)
+        a_brake = 0.001 # m/s^2 — conservative: SAM has limited braking (drag + RPM ramp-down only)
         d_eps   = 0.75  # m      (was 0.5 — matches final_pos_tolerance)
 
         x_goal = self.model.p[self.nx + self.nu + 0]
@@ -292,16 +292,12 @@ class NMPC:
         Z_pos   = 1e6   # quadratic penalty for position box violations (hard wall)
         z_pos   = 1e4   # linear   penalty for position box violations
 
-        # Brake penalty sizing: with a_brake = 0.001 the constraint is
-        # permanently violated at any cruise speed (brake_h ≈ 0.03–0.09).
-        # The penalty must be LOW so the permanent violation doesn't corrupt
-        # the QP gradient — otherwise the brake gradient (reduce speed) fights
-        # the MPCC progress gradient (increase speed) and causes QP failure
-        # under SQP_RTI.  With Z=1, z=0.1 the per-stage penalty is < 0.02,
-        # negligible vs the tracking cost (~500).  The constraint still
-        # provides a gentle nudge to slow down near the goal.
-        Z_brake = 1.0   # quadratic penalty for braking funnel violations
-        z_brake = 0.1   # linear   penalty for braking funnel violations
+        # Brake penalty: with a_brake = 0.001 the constraint is permanently
+        # violated at cruise speed.  Keep penalties low to avoid corrupting
+        # the QP — deceleration is handled by the reference ramp-down in
+        # DiveControllerMPC.get_current_ref_array(), not by this constraint.
+        Z_brake = 1.0   # Before: 50 # quadratic penalty for braking funnel violations
+        z_brake = 0.1   # Before: 5 linear   penalty for braking funnel violations
 
         Z_dz    = 200.0 # quadratic penalty for RPM deadzone
         z_dz    = 20.0  # linear   penalty for RPM deadzone
@@ -350,7 +346,7 @@ class NMPC:
 
         self.ocp.solver_options.globalization = "MERIT_BACKTRACKING"
         # self.ocp.solver_options.regularize_method = 'NO_REGULARIZE'
-        self.ocp.solver_options.levenberg_marquardt = 1e-4
+        self.ocp.solver_options.levenberg_marquardt = 1e-2
         # self.ocp.solver_options.regularize_method = 'PROJECT'
 
         # Simulation object based on OCP model.
@@ -535,7 +531,7 @@ class NMPC:
         if terminal:
             return ca.vertcat(
                 e_c_vec, e_l, v_theta, e_heading, e_pitch, e_sync,
-                x[9],   # heave velocity (prevent depth overshoot)
+                x[9],
             )
         else:
             return ca.vertcat(
