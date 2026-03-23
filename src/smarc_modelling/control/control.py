@@ -70,8 +70,8 @@ class NMPC:
         Q = np.diag(Q_diag)
 
 
-        R_diag = np.array([5e-2,   # VBS rate (increased to smooth out VBS actuation)
-                           1e-2,   # LCG rate (low: LCG is the primary pitch actuator)
+        R_diag = np.array([1e-3,   # From 5e-2 to 1e-3 for VBS rate (low: VBS is primary depth actuator at low speed)
+                           1e-2,   # From 1e-1 to 1e-2 for LCG rate (low: LCG is the primary pitch actuator)
                            1e-1,   # stern angle rate
                            1e-1,   # rudder angle rate (low penalty allows fast swing into turns)
                            1e-8,   # RPM1 rate
@@ -150,32 +150,34 @@ class NMPC:
         pos_lbx = np.array([x_min, y_min, z_min])
         pos_ubx = np.array([x_max, y_max, z_max])
 
+        # --- surge velocity bound for x[7] ---
+        surge_max = 0.2   # m/s — conservative to account for model underestimating real vehicle speed
+        surge_min = -0.2  # m/s — allow slight reverse for braking transients
+        surge_lbx = np.array([surge_min])  # allow slight reverse for braking transients
+        surge_ubx = np.array([surge_max])
+
         # --- actuator state bounds for x[13:19] = [x_vbs, x_lcg, δs, δr, rpm1, rpm2] ---
         act_lbx = np.array([0.0, 0.0, -np.deg2rad(7), -np.deg2rad(7), -500.0, -500.0])
         act_ubx = np.array([100.0, 100.0, np.deg2rad(7), np.deg2rad(7), 450.0, 450.0])
 
-        # x[19] = theta (arc-length progress)
-        #theta_lbx = np.array([0.0])
-        #theta_ubx = np.array([1e6])
-
         # x[20] = v_theta (progress speed along path)
-        v_theta_max = 0.3  # m/s — implicit speed ceiling via e_sync coupling
+        v_theta_max = surge_max  # must match surge_max — e_sync couples v_theta to surge
         v_theta_lbx = np.array([0.0])
         v_theta_ubx = np.array([v_theta_max])
 
-        idxbx = np.r_[[0, 1, 2], [13, 14, 15, 16, 17, 18], [20]]
-        lbx = np.r_[pos_lbx, act_lbx, v_theta_lbx]
-        ubx = np.r_[pos_ubx, act_ubx, v_theta_ubx]
+        idxbx = np.r_[[0, 1, 2], [7], [13, 14, 15, 16, 17, 18], [20]]
+        lbx = np.r_[pos_lbx, surge_lbx, act_lbx, v_theta_lbx]
+        ubx = np.r_[pos_ubx, surge_ubx, act_ubx, v_theta_ubx]
 
         self.ocp.constraints.idxbx = idxbx
         self.ocp.constraints.lbx = lbx
         self.ocp.constraints.ubx = ubx
 
-        # Soft constraints on position box bounds (first 3 entries in idxbx)
-        # v_theta bound (index 9 in idxbx) is kept hard — it must never exceed v_theta_max
-        idxsbx = np.array([0, 1, 2])
+        # Soft constraints on position + surge bounds (first 4 entries in idxbx)
+        # v_theta bound (last in idxbx) is kept hard — it must never exceed v_theta_max
+        idxsbx = np.array([0, 1, 2, 3])
         self.ocp.constraints.idxsbx = idxsbx
-        n_sb = idxsbx.size  # 3
+        n_sb = idxsbx.size  # 4
 
         # ----- Braking / Speed-Funnel Constraint ----------------------------------
         # Ensures surge velocity is low enough that the vehicle can brake to a stop
@@ -259,32 +261,35 @@ class NMPC:
 
         h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
         self.r_track = 1.0  # [m] default tube radius (was 0.5; widened for turns)
-        self.IDX_TRACK = 2  # index of h_track inside con_h (after brake_h removal)
+        self.IDX_TRACK = 3  # index of h_track inside con_h for dynamically updating track radius
 
-        # con_h layout: [brake_h(1), h_dz1(1), h_dz2(1), h_track(1)]
+        # ----- Pitch angle constraint ------------------------------------------------
+        # Limit the vehicle pitch to ±pitch_max_deg by constraining sin(pitch).
+        # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), a smooth polynomial in
+        # quaternion components — avoids arcsin singularities and gives the SQP
+        # well-behaved gradients everywhere.
+        self.pitch_max_deg = 15.0
+        sin_pitch_max = np.sin(np.deg2rad(self.pitch_max_deg))
+        q0_c = self.model.x[3]
+        q1_c = self.model.x[4]
+        q2_c = self.model.x[5]
+        q3_c = self.model.x[6]
+        h_pitch = 2.0 * (q0_c * q2_c - q1_c * q3_c)   # = sin(pitch)
+
+        # con_h layout: [brake_h(1), h_dz1(1), h_dz2(1), h_track(1), h_pitch(1)]
         r_sq = self.r_track ** 2
-        self.ocp.model.con_h_expr = ca.vertcat(brake_h, h_dz1, h_dz2, h_track)
-        self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9, 0.0])
-        self.ocp.constraints.uh = np.array([ 0.0,  0.0,  0.0, r_sq])
-        self.ocp.constraints.idxsh = np.arange(4)
-        n_sh = 4
-        #self.ocp.model.con_h_expr = ca.vertcat(h_dz1, h_dz2, h_track)
-        #self.ocp.constraints.lh = np.array([-1e9, -1e9, 0.0])
-        #self.ocp.constraints.uh = np.array([ 0.0,  0.0, r_sq])
-        #self.ocp.constraints.idxsh = np.arange(3)
-        #n_sh = 3
+        self.ocp.model.con_h_expr = ca.vertcat(brake_h, h_dz1, h_dz2, h_track, h_pitch)
+        self.ocp.constraints.lh = np.array([-1e9, -1e9, -1e9, 0.0, -sin_pitch_max])
+        self.ocp.constraints.uh = np.array([ 0.0,  0.0,  0.0, r_sq,  sin_pitch_max])
+        self.ocp.constraints.idxsh = np.arange(5)
+        n_sh = 5
 
-        # Terminal nonlinear constraint (same structure + track)
-        self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, h_dz1, h_dz2, h_track)
-        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9, 0.0])
-        self.ocp.constraints.uh_e = np.array([ 0.0,  0.0,  0.0, r_sq])
-        self.ocp.constraints.idxsh_e = np.arange(4)
-        n_sh_e = 4
-        #self.ocp.model.con_h_expr_e = ca.vertcat(h_dz1, h_dz2, h_track)
-        #self.ocp.constraints.lh_e = np.array([-1e9, -1e9, 0.0])
-        #self.ocp.constraints.uh_e = np.array([ 0.0,  0.0, r_sq])
-        #self.ocp.constraints.idxsh_e = np.arange(3)
-        #n_sh_e = 3
+        # Terminal nonlinear constraint (same structure)
+        self.ocp.model.con_h_expr_e = ca.vertcat(brake_h, h_dz1, h_dz2, h_track, h_pitch)
+        self.ocp.constraints.lh_e = np.array([-1e9, -1e9, -1e9, 0.0, -sin_pitch_max])
+        self.ocp.constraints.uh_e = np.array([ 0.0,  0.0,  0.0, r_sq,  sin_pitch_max])
+        self.ocp.constraints.idxsh_e = np.arange(5)
+        n_sh_e = 5
 
         # ----- Unified slack penalty vectors ------------------------------------
         # acados orders slack variables as: [idxsbx | idxsh] for stage costs.
@@ -296,8 +301,8 @@ class NMPC:
         # violated at cruise speed.  Keep penalties low to avoid corrupting
         # the QP — deceleration is handled by the reference ramp-down in
         # DiveControllerMPC.get_current_ref_array(), not by this constraint.
-        Z_brake = 1.0   # Before: 50 # quadratic penalty for braking funnel violations
-        z_brake = 0.1   # Before: 5 linear   penalty for braking funnel violations
+        Z_brake = 50.0   # Before: 50 # quadratic penalty for braking funnel violations
+        z_brake = 5.0   # Before: 5 linear   penalty for braking funnel violations
 
         Z_dz    = 200.0 # quadratic penalty for RPM deadzone
         z_dz    = 20.0  # linear   penalty for RPM deadzone
@@ -305,25 +310,20 @@ class NMPC:
         Z_track = 1e5   # quadratic penalty for track tube violation
         z_track = 1e3   # linear   penalty for track tube violation
 
-        # Stage: [sbx(3), sh_brake(1), sh_dz(2), sh_track(1)] = size 7
-        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track]
-        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track]
-        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track]
-        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track]
-        #self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_dz, Z_dz, Z_track]
-        #self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_dz, Z_dz, Z_track]
-        #self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_dz, z_dz, z_track]
-        #self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_dz, z_dz, z_track]
+        Z_pitch = 1e6   # quadratic penalty for pitch limit violation
+        z_pitch = 1e3   # linear   penalty for pitch limit violation
 
-        # Terminal: [sh_e_brake(1), sh_e_dz(2), sh_e_track(1)] = size 4
-        self.ocp.cost.Zl_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track]
-        self.ocp.cost.Zu_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track]
-        self.ocp.cost.zl_e = np.r_[z_brake, z_dz, z_dz, z_track]
-        self.ocp.cost.zu_e = np.r_[z_brake, z_dz, z_dz, z_track]
-        #self.ocp.cost.Zl_e = np.r_[Z_dz, Z_dz, Z_track]
-        #self.ocp.cost.Zu_e = np.r_[Z_dz, Z_dz, Z_track]
-        #self.ocp.cost.zl_e = np.r_[z_dz, z_dz, z_track]
-        #self.ocp.cost.zu_e = np.r_[z_dz, z_dz, z_track]
+        # Stage: [sbx(4), sh_brake(1), sh_dz(2), sh_track(1), sh_pitch(1)] = size 9
+        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
+        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
+        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track, z_pitch]
+        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track, z_pitch]
+
+        # Terminal: [sh_e_brake(1), sh_e_dz(2), sh_e_track(1), sh_e_pitch(1)] = size 5
+        self.ocp.cost.Zl_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
+        self.ocp.cost.Zu_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
+        self.ocp.cost.zl_e = np.r_[z_brake, z_dz, z_dz, z_track, z_pitch]
+        self.ocp.cost.zu_e = np.r_[z_brake, z_dz, z_dz, z_track, z_pitch]
 
         # ----------------------- Solver Setup --------------------------
         # set prediction horizon
