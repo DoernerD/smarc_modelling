@@ -64,8 +64,8 @@ class NMPC:
                            1000.0,  # contour z (reduced from 2000: high z weight causes aggressive dive-then-overshoot)
                            300.0,   # lag (along-track; controls overshoot on level segments)
                            100.0,   # progress speed penalty (higher = slower cruise)
-                           1000.0,  # heading alignment (1-cos: drives yaw turns)
-                           800.0,   # pitch alignment (sin: drives trim recovery)
+                           1500.0,  # heading alignment (1-cos: drives yaw turns)
+                           200.0,   # pitch alignment (soft trim guide; contour-z drives depth)
                            400.0])  # v_theta-to-vehicle-velocity synchronization
         Q = np.diag(Q_diag)
 
@@ -143,9 +143,9 @@ class NMPC:
         self.ocp.constraints.idxbu = np.array([0, 1, 2, 3, 6])
 
         # --- position bounds (NED: z positive down) ---
-        x_min, x_max = 0.0, 8.0
+        x_min, x_max = 0.9, 8.0     # Right now, we initialize odom 1m away from mocap, which is the wall.
         y_min, y_max = -2.0, 2.0
-        z_min, z_max = -0.5, 3.0
+        z_min, z_max = -0.5, 3.0    # -0.5 is in case the pressure sensor gives funky readings at the surface
 
         pos_lbx = np.array([x_min, y_min, z_min])
         pos_ubx = np.array([x_max, y_max, z_max])
@@ -173,10 +173,16 @@ class NMPC:
         self.ocp.constraints.lbx = lbx
         self.ocp.constraints.ubx = ubx
 
+        # Terminal state box constraints (same bounds as intermediate stages)
+        self.ocp.constraints.idxbx_e = idxbx
+        self.ocp.constraints.lbx_e = lbx
+        self.ocp.constraints.ubx_e = ubx
+
         # Soft constraints on position + surge bounds (first 4 entries in idxbx)
         # v_theta bound (last in idxbx) is kept hard — it must never exceed v_theta_max
         idxsbx = np.array([0, 1, 2, 3])
         self.ocp.constraints.idxsbx = idxsbx
+        self.ocp.constraints.idxsbx_e = idxsbx
         n_sb = idxsbx.size  # 4
 
         # ----- Braking / Speed-Funnel Constraint ----------------------------------
@@ -260,15 +266,31 @@ class NMPC:
         self.model.e_c_vec = _pos_diff - _e_l * _t_hat
 
         h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
-        self.r_track = 1.0  # [m] default tube radius (was 0.5; widened for turns)
+        self.r_track = 1.5  # [m] default tube radius (was 0.5; widened for turns)
         self.IDX_TRACK = 3  # index of h_track inside con_h for dynamically updating track radius
+
+        # ----- Wall-lock parameters ---------------------------------------------------
+        # Once the vehicle moves past wall_lock_threshold (x), the x lower
+        # box-constraint is raised to wall_lock_min to prevent drifting back
+        # into the wall.  The constraint stays active for the rest of the mission.
+        self.wall_lock_threshold = 1.5    # [m] x value that arms the lock
+        self.wall_lock_min       = 1.5    # [m] enforced x lower bound once locked
+        self.IDX_X_BOX           = 0      # index of x inside lbx/ubx vectors
+
+        # ----- Depth-lock parameters --------------------------------------------------
+        # Once the vehicle descends past depth_lock_threshold (NED z), the z lower
+        # box-constraint is raised to depth_lock_min to prevent resurfacing.
+        # The constraint stays active for the rest of the mission.
+        self.depth_lock_threshold = 0.5   # [m] z value that arms the lock
+        self.depth_lock_min       = 0.3   # [m] enforced z lower bound once locked
+        self.IDX_Z_BOX            = 2     # index of z inside lbx/ubx vectors
 
         # ----- Pitch angle constraint ------------------------------------------------
         # Limit the vehicle pitch to ±pitch_max_deg by constraining sin(pitch).
         # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), a smooth polynomial in
         # quaternion components — avoids arcsin singularities and gives the SQP
         # well-behaved gradients everywhere.
-        self.pitch_max_deg = 15.0
+        self.pitch_max_deg = 20.0 # protects DR; e_pitch weight is low so no need to match full tangent
         sin_pitch_max = np.sin(np.deg2rad(self.pitch_max_deg))
         q0_c = self.model.x[3]
         q1_c = self.model.x[4]
@@ -294,8 +316,14 @@ class NMPC:
         # ----- Unified slack penalty vectors ------------------------------------
         # acados orders slack variables as: [idxsbx | idxsh] for stage costs.
         # Terminal stage only has idxsh_e.
-        Z_pos   = 1e6   # quadratic penalty for position box violations (hard wall)
-        z_pos   = 1e4   # linear   penalty for position box violations
+        Z_pos_x = 1e9 # quadratic penalty for x position box violation (end wall — hard to brake)
+        Z_pos_y = 1e6   # quadratic penalty for y position box violation
+        Z_pos_z = 1e9   # quadratic penalty for z position box violation (near-hard: protects depth lock)
+        Z_surge = 1e6   # quadratic penalty for surge velocity violation
+        z_pos_x = 1e7   # linear   penalty for x position box violation (end wall)
+        z_pos_y = 1e4   # linear   penalty for y position box violation
+        z_pos_z = 1e6   # linear   penalty for z position box violation (near-hard: protects depth lock)
+        z_surge = 1e4   # linear   penalty for surge velocity violation
 
         # Brake penalty: with a_brake = 0.001 the constraint is permanently
         # violated at cruise speed.  Keep penalties low to avoid corrupting
@@ -310,20 +338,22 @@ class NMPC:
         Z_track = 1e5   # quadratic penalty for track tube violation
         z_track = 1e3   # linear   penalty for track tube violation
 
-        Z_pitch = 1e6   # quadratic penalty for pitch limit violation
-        z_pitch = 1e3   # linear   penalty for pitch limit violation
+        Z_pitch = 1e9   # quadratic penalty for pitch limit violation (near-hard: DR depends on low pitch)
+        z_pitch = 1e6   # linear   penalty for pitch limit violation
 
-        # Stage: [sbx(4), sh_brake(1), sh_dz(2), sh_track(1), sh_pitch(1)] = size 9
-        self.ocp.cost.Zl = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
-        self.ocp.cost.Zu = np.r_[Z_pos * np.ones(n_sb), Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
-        self.ocp.cost.zl = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track, z_pitch]
-        self.ocp.cost.zu = np.r_[z_pos * np.ones(n_sb), z_brake, z_dz, z_dz, z_track, z_pitch]
+        # Stage: [sbx_x(1), sbx_y(1), sbx_z(1), sbx_surge(1), sh_brake(1), sh_dz(2), sh_track(1), sh_pitch(1)] = size 9
+        Zl_sbx = np.array([Z_pos_x, Z_pos_y, Z_pos_z, Z_surge])
+        zl_sbx = np.array([z_pos_x, z_pos_y, z_pos_z, z_surge])
+        self.ocp.cost.Zl = np.r_[Zl_sbx, Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
+        self.ocp.cost.Zu = np.r_[Zl_sbx, Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
+        self.ocp.cost.zl = np.r_[zl_sbx, z_brake, z_dz, z_dz, z_track, z_pitch]
+        self.ocp.cost.zu = np.r_[zl_sbx, z_brake, z_dz, z_dz, z_track, z_pitch]
 
-        # Terminal: [sh_e_brake(1), sh_e_dz(2), sh_e_track(1), sh_e_pitch(1)] = size 5
-        self.ocp.cost.Zl_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
-        self.ocp.cost.Zu_e = np.r_[Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
-        self.ocp.cost.zl_e = np.r_[z_brake, z_dz, z_dz, z_track, z_pitch]
-        self.ocp.cost.zu_e = np.r_[z_brake, z_dz, z_dz, z_track, z_pitch]
+        # Terminal: [sbx_e_x(1), sbx_e_y(1), sbx_e_z(1), sbx_e_surge(1), sh_e_brake(1), sh_e_dz(2), sh_e_track(1), sh_e_pitch(1)] = size 9
+        self.ocp.cost.Zl_e = np.r_[Zl_sbx, Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
+        self.ocp.cost.Zu_e = np.r_[Zl_sbx, Z_brake, Z_dz, Z_dz, Z_track, Z_pitch]
+        self.ocp.cost.zl_e = np.r_[zl_sbx, z_brake, z_dz, z_dz, z_track, z_pitch]
+        self.ocp.cost.zu_e = np.r_[zl_sbx, z_brake, z_dz, z_dz, z_track, z_pitch]
 
         # ----------------------- Solver Setup --------------------------
         # set prediction horizon
