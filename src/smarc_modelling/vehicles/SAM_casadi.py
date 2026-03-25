@@ -382,8 +382,8 @@ class SAM_casadi:
 
         self.lcg = LongitudinalCenterOfGravityControl(
             l_lcg_l=0.223,
-            # l_lcg_r=0.1,
-            l_lcg_r=0.06,
+             l_lcg_r=0.15,
+            #l_lcg_r=0.06,
             m_lcg=2.6,
             h_lcg_dim=0.08,
             p_OC_O=self.p_OC_O,
