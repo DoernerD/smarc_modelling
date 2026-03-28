@@ -129,7 +129,7 @@ class NMPC:
         # --------------------- Constraint Setup --------------------------
         vbs_dot = 200  # Maximum rate of change for the VBS
         lcg_dot = 50  # Maximum rate of change for the LCG
-        tv_dot = 0.5  # Maximum rate of change for the thrust vectoring (was 0.2; raised for faster turns)
+        tv_dot = 0.7  # Maximum rate of change for the thrust vectoring [rad/s]
         delta_v_theta_max = 0.5  # Maximum progress speed (m/s arc-length)
 
         # Declare initial state
@@ -143,7 +143,7 @@ class NMPC:
         self.ocp.constraints.idxbu = np.array([0, 1, 2, 3, 6])
 
         # --- position bounds (NED: z positive down) ---
-        x_min, x_max = 0.9, 8.0     # Right now, we initialize odom 1m away from mocap, which is the wall.
+        x_min, x_max = 0.0, 8.0     # Wall lock handles the minimum once the vehicle moves forward.
         y_min, y_max = -2.0, 2.0
         z_min, z_max = -0.5, 3.0    # -0.5 is in case the pressure sensor gives funky readings at the surface
 
@@ -196,13 +196,14 @@ class NMPC:
         # that dist_to_goal reflects the remaining PATH distance, not the Euclidean
         # shortcut.  This prevents premature braking on curved trajectories.
         #
-        # a_brake controls how early the funnel bites.  With a_brake = 0.1 the
-        # speed ceiling at typical distances is well above SAM's cruise speed:
-        #   0.5 m → 0.39 m/s,  1 m → 0.49 m/s,  2 m → 0.63 m/s,  4 m → 0.87 m/s
-        # The funnel only meaningfully limits speed within ~0.5 m of the goal,
-        # which is what we want for trajectory following with end-stop braking.
-        a_brake = 0.001 # m/s^2 — conservative: SAM has limited braking (drag + RPM ramp-down only)
-        d_eps   = 0.75  # m      (was 0.5 — matches final_pos_tolerance)
+        # a_brake controls how early the funnel bites.  With a_brake = 0.007:
+        #   0.5 m → 0.12 m/s,  1 m → 0.14 m/s,  2 m → 0.19 m/s,  2.5 m → 0.20 m/s
+        # The funnel starts limiting cruise speed (0.2 m/s) at ~2.5 m from
+        # the goal, giving the solver ~25 stages to plan active braking via
+        # reverse thrust.  d_eps controls the speed limit at the goal itself:
+        # at d=0, v_max = sqrt(2*a_brake*d_eps) ≈ 0.08 m/s.
+        a_brake = 0.007  # m/s^2 — bites at ~2.5 m from goal at cruise speed
+        d_eps   = 0.5    # m — tighter at the goal to prevent overshoot
 
         x_goal = self.model.p[self.nx + self.nu + 0]
         y_goal = self.model.p[self.nx + self.nu + 1]
@@ -217,26 +218,20 @@ class NMPC:
         brake_h = self.model.x[7] ** 2 - 2.0 * a_brake * (dist_to_goal + d_eps)
 
         # ----- RPM Deadzone Avoidance (distance-independent) ----------------------
-        # SAM thrusters have a ±200 RPM deadzone where no thrust is produced.
+        # SAM thrusters have a ~200 RPM deadzone where no thrust is produced.
+        # The exact boundary varies with water speed, prop loading, etc.
         #
-        # Complementarity constraint: h = t²(1-t²) ≤ 0, where t = rpm/deadzone.
-        # Three penalty-free operating points:
-        #   rpm = 0    (h = 0, no thrust intended)
-        #   |rpm| = D  (h = 0, at the deadzone boundary)
-        #   |rpm| > D  (h < 0, producing thrust)
-        # Violated only for 0 < |rpm| < D (in the deadzone, where the MPC
-        # expects thrust but the real hardware produces none).
+        # Complementarity constraint: h = t²(1-t²) ≤ 0, where t = rpm/rpm_dz.
+        # Penalty-free operating points: rpm = 0 and |rpm| >= rpm_dz.
+        # rpm_dz is set ABOVE the nominal hardware deadzone so the solver
+        # commits to either 0 (no thrust) or beyond rpm_dz (real thrust),
+        # never parking at the hardware boundary where thrust is ambiguous.
+        # Tune rpm_dz based on the highest deadzone observed in practice.
         #
-        # Gradient behaviour in the deadzone:
-        #   0 < |rpm| < D/√2 ≈ 141:  gradient pushes toward rpm=0
-        #   D/√2 < |rpm| < D = 200:  gradient pushes toward |rpm|=D
-        # This means the solver can freely transit through rpm=0 during
-        # direction switches (no penalty barrier at zero), while the upper
-        # half of the deadzone still gets pushed past the boundary.
-        #
-        # The vehicle dynamics model is NOT modified — the full thrust gradient
-        # is preserved for fast SQP_RTI convergence.
-        rpm_dz = 200.0
+        # Gradient at rpm = 0 is zero (flat saddle), so the solver can freely
+        # transit through 0 during direction switches (e.g. reverse thrust
+        # for braking).  No penalty barrier blocks the sign change.
+        rpm_dz = 220.0  # above nominal 200 RPM hardware deadzone
         t1 = self.model.x[17] / rpm_dz
         t2 = self.model.x[18] / rpm_dz
         h_dz1 = t1**2 * (1.0 - t1**2)
@@ -273,7 +268,7 @@ class NMPC:
         # Once the vehicle moves past wall_lock_threshold (x), the x lower
         # box-constraint is raised to wall_lock_min to prevent drifting back
         # into the wall.  The constraint stays active for the rest of the mission.
-        self.wall_lock_threshold = 1.5    # [m] x value that arms the lock
+        self.wall_lock_threshold = 1.7    # [m] x value that arms the lock
         self.wall_lock_min       = 1.5    # [m] enforced x lower bound once locked
         self.IDX_X_BOX           = 0      # index of x inside lbx/ubx vectors
 
@@ -325,12 +320,12 @@ class NMPC:
         z_pos_z = 1e6   # linear   penalty for z position box violation (near-hard: protects depth lock)
         z_surge = 1e4   # linear   penalty for surge velocity violation
 
-        # Brake penalty: with a_brake = 0.001 the constraint is permanently
-        # violated at cruise speed.  Keep penalties low to avoid corrupting
-        # the QP — deceleration is handled by the reference ramp-down in
-        # DiveControllerMPC.get_current_ref_array(), not by this constraint.
-        Z_brake = 50.0   # Before: 50 # quadratic penalty for braking funnel violations
-        z_brake = 5.0   # Before: 5 linear   penalty for braking funnel violations
+        # Brake penalty: with a_brake = 0.009 the funnel bites at ~1.5 m from
+        # the goal.  Strong penalties force the solver to actively brake
+        # (reverse thrust) rather than coast on drag — same mechanism that
+        # makes the solver brake near the wall constraints.
+        Z_brake = 1e5    # quadratic penalty for braking funnel violations
+        z_brake = 1e3    # linear   penalty for braking funnel violations
 
         Z_dz    = 200.0 # quadratic penalty for RPM deadzone
         z_dz    = 20.0  # linear   penalty for RPM deadzone
