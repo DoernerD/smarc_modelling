@@ -64,7 +64,7 @@ class NMPC:
                            850.0,   # contour z (from 1000: gentler but still drives the dive)
                            300.0,   # lag (along-track; controls overshoot on level segments)
                            100.0,   # progress speed penalty (higher = slower cruise)
-                           200.0,   # heading yaw alignment (sin-based, decoupled from pitch)
+                           1500.0,  # heading yaw alignment (1-cos, horizontal-normalized, decoupled from pitch)
                            200.0,   # pitch alignment (soft trim guide; contour-z drives depth)
                            400.0])  # v_theta-to-vehicle-velocity synchronization
         Q = np.diag(Q_diag)
@@ -261,7 +261,7 @@ class NMPC:
         self.model.e_c_vec = _pos_diff - _e_l * _t_hat
 
         h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
-        self.r_track = 1.5  # [m] default tube radius (was 0.5; widened for turns)
+        self.r_track = 3.0  # [m] wide tube to accommodate multi-point turn deviations
         self.IDX_TRACK = 3  # index of h_track inside con_h for dynamically updating track radius
 
         # ----- Wall-lock parameters ---------------------------------------------------
@@ -371,7 +371,7 @@ class NMPC:
 
         self.ocp.solver_options.globalization = "MERIT_BACKTRACKING"
         # self.ocp.solver_options.regularize_method = 'NO_REGULARIZE'
-        self.ocp.solver_options.levenberg_marquardt = 1e-2
+        self.ocp.solver_options.levenberg_marquardt = 1e-1
         # self.ocp.solver_options.regularize_method = 'PROJECT'
 
         # Simulation object based on OCP model.
@@ -535,10 +535,16 @@ class NMPC:
         fwd_y = 2 * (q1_s * q2_s + q0_s * q3_s)
         fwd_z = 2 * (q1_s * q3_s - q0_s * q2_s)
         cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
-        # Yaw-only heading error: cross-product z-component ≈ sin(yaw_error).
-        # Decoupled from pitch so it won't drive the rudder when the path
-        # tangent points downward (the root cause of the initial port turn).
-        e_heading = fwd_x * t_hat[1] - fwd_y * t_hat[0]
+        # Yaw-only heading: 1 - cos(yaw_error), computed from horizontal
+        # projections of fwd and t_hat.  Normalizing removes the cos(pitch)
+        # factor that would otherwise couple pitch into heading (the root
+        # cause of the initial port turn on dive segments).  Unlike the
+        # sin(yaw) cross-product, 1-cos is monotonic over [0°, 180°] and
+        # correctly drives U-turns without a spurious equilibrium at 180°.
+        h_dot = fwd_x * t_hat[0] + fwd_y * t_hat[1]
+        fwd_h_norm = ca.sqrt(fwd_x**2 + fwd_y**2 + 1e-6)
+        t_h_norm = ca.sqrt(t_hat[0]**2 + t_hat[1]**2 + 1e-6)
+        e_heading = 1 - h_dot / (fwd_h_norm * t_h_norm)
 
         # Pitch alignment: sin(pitch_state) - sin(pitch_ref).
         # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), smooth polynomial in quaternion.
