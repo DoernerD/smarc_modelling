@@ -59,21 +59,21 @@ class NMPC:
         #R = np.diag(R_diag)
         
         
-        Q_diag = np.array([500.0,   # contour x (reduced from 1000 for turn flexibility)
-                           500.0,   # contour y (reduced from 1000 for turn flexibility)
-                           1000.0,  # contour z (reduced from 2000: high z weight causes aggressive dive-then-overshoot)
+        Q_diag = np.array([500.0,   # contour x
+                           500.0,   # contour y
+                           850.0,   # contour z (from 1000: gentler but still drives the dive)
                            300.0,   # lag (along-track; controls overshoot on level segments)
                            100.0,   # progress speed penalty (higher = slower cruise)
-                           1500.0,  # heading alignment (1-cos: drives yaw turns)
+                           200.0,   # heading yaw alignment (sin-based, decoupled from pitch)
                            200.0,   # pitch alignment (soft trim guide; contour-z drives depth)
                            400.0])  # v_theta-to-vehicle-velocity synchronization
         Q = np.diag(Q_diag)
 
 
-        R_diag = np.array([1e-3,   # From 5e-2 to 1e-3 for VBS rate (low: VBS is primary depth actuator at low speed)
-                           1e-2,   # From 1e-1 to 1e-2 for LCG rate (low: LCG is the primary pitch actuator)
+        R_diag = np.array([1e-2,   # VBS rate (10x from 1e-3: smooths buoyancy without crippling depth control)
+                           5e-2,   # LCG rate (5x from 1e-2: gentler CG-induced pitch changes)
                            1e-1,   # stern angle rate
-                           1e-1,   # rudder angle rate (low penalty allows fast swing into turns)
+                           1e-1,   # rudder angle rate
                            1e-8,   # RPM1 rate
                            1e-8,   # RPM2 rate
                            1e0])   # delta_v_theta rate
@@ -285,7 +285,7 @@ class NMPC:
         # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), a smooth polynomial in
         # quaternion components — avoids arcsin singularities and gives the SQP
         # well-behaved gradients everywhere.
-        self.pitch_max_deg = 20.0 # protects DR; e_pitch weight is low so no need to match full tangent
+        self.pitch_max_deg = 30.0 # allows moderate dives; protects DR at extreme angles
         sin_pitch_max = np.sin(np.deg2rad(self.pitch_max_deg))
         q0_c = self.model.x[3]
         q1_c = self.model.x[4]
@@ -333,8 +333,8 @@ class NMPC:
         Z_track = 1e5   # quadratic penalty for track tube violation
         z_track = 1e3   # linear   penalty for track tube violation
 
-        Z_pitch = 1e9   # quadratic penalty for pitch limit violation (near-hard: DR depends on low pitch)
-        z_pitch = 1e6   # linear   penalty for pitch limit violation
+        Z_pitch = 1e5   # quadratic penalty for pitch limit violation (softened to prevent solver crashes on transient overshoots)
+        z_pitch = 1e3   # linear   penalty for pitch limit violation
 
         # Stage: [sbx_x(1), sbx_y(1), sbx_z(1), sbx_surge(1), sh_brake(1), sh_dz(2), sh_track(1), sh_pitch(1)] = size 9
         Zl_sbx = np.array([Z_pos_x, Z_pos_y, Z_pos_z, Z_surge])
@@ -535,7 +535,10 @@ class NMPC:
         fwd_y = 2 * (q1_s * q2_s + q0_s * q3_s)
         fwd_z = 2 * (q1_s * q3_s - q0_s * q2_s)
         cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
-        e_heading = 1 - cos_align
+        # Yaw-only heading error: cross-product z-component ≈ sin(yaw_error).
+        # Decoupled from pitch so it won't drive the rudder when the path
+        # tangent points downward (the root cause of the initial port turn).
+        e_heading = fwd_x * t_hat[1] - fwd_y * t_hat[0]
 
         # Pitch alignment: sin(pitch_state) - sin(pitch_ref).
         # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), smooth polynomial in quaternion.
