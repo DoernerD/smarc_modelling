@@ -371,7 +371,7 @@ class NMPC:
 
         self.ocp.solver_options.globalization = "MERIT_BACKTRACKING"
         # self.ocp.solver_options.regularize_method = 'NO_REGULARIZE'
-        self.ocp.solver_options.levenberg_marquardt = 1e-1
+        self.ocp.solver_options.levenberg_marquardt = 1e-2 # before: 1e-2
         # self.ocp.solver_options.regularize_method = 'PROJECT'
 
         # Simulation object based on OCP model.
