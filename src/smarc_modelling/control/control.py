@@ -64,7 +64,7 @@ class NMPC:
                            850.0,   # contour z (from 1000: gentler but still drives the dive)
                            300.0,   # lag (along-track; controls overshoot on level segments)
                            100.0,   # progress speed penalty (higher = slower cruise)
-                           1500.0,  # heading yaw alignment (1-cos, horizontal-normalized, decoupled from pitch)
+                           600.0,   # heading yaw alignment (atan2, signed radians, decoupled from pitch)
                            200.0,   # pitch alignment (soft trim guide; contour-z drives depth)
                            400.0])  # v_theta-to-vehicle-velocity synchronization
         Q = np.diag(Q_diag)
@@ -145,7 +145,7 @@ class NMPC:
         # --- position bounds (NED: z positive down) ---
         x_min, x_max = 0.0, 8.0     # Wall lock handles the minimum once the vehicle moves forward.
         y_min, y_max = -2.0, 2.0
-        z_min, z_max = -0.5, 3.0    # -0.5 is in case the pressure sensor gives funky readings at the surface
+        z_min, z_max = -0.5, 2.7    # -0.5 is in case the pressure sensor gives funky readings at the surface
 
         pos_lbx = np.array([x_min, y_min, z_min])
         pos_ubx = np.array([x_max, y_max, z_max])
@@ -312,11 +312,11 @@ class NMPC:
         # acados orders slack variables as: [idxsbx | idxsh] for stage costs.
         # Terminal stage only has idxsh_e.
         Z_pos_x = 1e9 # quadratic penalty for x position box violation (end wall — hard to brake)
-        Z_pos_y = 1e6   # quadratic penalty for y position box violation
+        Z_pos_y = 1e7   # quadratic penalty for y position box violation
         Z_pos_z = 1e9   # quadratic penalty for z position box violation (near-hard: protects depth lock)
         Z_surge = 1e6   # quadratic penalty for surge velocity violation
         z_pos_x = 1e7   # linear   penalty for x position box violation (end wall)
-        z_pos_y = 1e4   # linear   penalty for y position box violation
+        z_pos_y = 1e5   # linear   penalty for y position box violation
         z_pos_z = 1e6   # linear   penalty for z position box violation (near-hard: protects depth lock)
         z_surge = 1e4   # linear   penalty for surge velocity violation
 
@@ -333,8 +333,8 @@ class NMPC:
         Z_track = 1e5   # quadratic penalty for track tube violation
         z_track = 1e3   # linear   penalty for track tube violation
 
-        Z_pitch = 1e5   # quadratic penalty for pitch limit violation (softened to prevent solver crashes on transient overshoots)
-        z_pitch = 1e3   # linear   penalty for pitch limit violation
+        Z_pitch = 1e7   # quadratic penalty for pitch limit violation (softened to prevent solver crashes on transient overshoots)
+        z_pitch = 1e5   # linear   penalty for pitch limit violation
 
         # Stage: [sbx_x(1), sbx_y(1), sbx_z(1), sbx_surge(1), sh_brake(1), sh_dz(2), sh_track(1), sh_pitch(1)] = size 9
         Zl_sbx = np.array([Z_pos_x, Z_pos_y, Z_pos_z, Z_surge])
@@ -535,16 +535,21 @@ class NMPC:
         fwd_y = 2 * (q1_s * q2_s + q0_s * q3_s)
         fwd_z = 2 * (q1_s * q3_s - q0_s * q2_s)
         cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
-        # Yaw-only heading: 1 - cos(yaw_error), computed from horizontal
-        # projections of fwd and t_hat.  Normalizing removes the cos(pitch)
-        # factor that would otherwise couple pitch into heading (the root
-        # cause of the initial port turn on dive segments).  Unlike the
-        # sin(yaw) cross-product, 1-cos is monotonic over [0°, 180°] and
-        # correctly drives U-turns without a spurious equilibrium at 180°.
+        # Yaw-only heading: atan2(cross, dot) of horizontal projections.
+        # Returns the signed yaw error in radians, decoupled from pitch.
+        # Unlike 1-cos which has zero Jacobian at 0° (no directional signal
+        # for the SQP linearization, causing random left/right drift),
+        # atan2 has a linear gradient at small errors AND is monotonic
+        # over (-180°, 180°) with maximum cost at 180° (no spurious
+        # equilibrium like the sin cross-product).
         h_dot = fwd_x * t_hat[0] + fwd_y * t_hat[1]
-        fwd_h_norm = ca.sqrt(fwd_x**2 + fwd_y**2 + 1e-6)
-        t_h_norm = ca.sqrt(t_hat[0]**2 + t_hat[1]**2 + 1e-6)
-        e_heading = 1 - h_dot / (fwd_h_norm * t_h_norm)
+        h_cross = fwd_x * t_hat[1] - fwd_y * t_hat[0]
+        e_heading = ca.atan2(h_cross, h_dot)
+        
+        # Old version
+        #fwd_h_norm = ca.sqrt(fwd_x**2 + fwd_y**2 + 1e-6)
+        #t_h_norm = ca.sqrt(t_hat[0]**2 + t_hat[1]**2 + 1e-6)
+        #e_heading = 1 - h_dot / (fwd_h_norm * t_h_norm)
 
         # Pitch alignment: sin(pitch_state) - sin(pitch_ref).
         # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), smooth polynomial in quaternion.
