@@ -38,8 +38,10 @@ class NMPC:
         # Terminal cost: position + quaternion + velocity tracking (unchanged).
         #
         # Residual layout
-        #   Stage:    [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 15
-        #   Terminal: [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1)] = 8
+        #   Stage:    [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1),
+        #              e_rudder_auth(1), e_stern_auth(1), u_phys(6), delta_v_theta(1)] = 17
+        #   Terminal: [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1),
+        #              e_rudder_auth(1), e_stern_auth(1)] = 10
 
         # Stage Q: contour(3) + lag(1) + heading(1) + v_theta(1) = 6
         #Q_diag = np.array([1000.0, 1000.0, 1000.0,   # contour (cross-track)
@@ -64,9 +66,11 @@ class NMPC:
                            850.0,   # contour z (from 1000: gentler but still drives the dive)
                            300.0,   # lag (along-track; controls overshoot on level segments)
                            100.0,   # progress speed penalty (higher = slower cruise)
-                           600.0,   # heading yaw alignment (atan2, signed radians, decoupled from pitch)
+                           1500.0, #600.0,   # heading yaw alignment (atan2, signed radians, decoupled from pitch)
                            200.0,   # pitch alignment (soft trim guide; contour-z drives depth)
-                           400.0])  # v_theta-to-vehicle-velocity synchronization
+                           400.0,   # v_theta-to-vehicle-velocity synchronization
+                           3000.0,  # rudder steering authority (penalises rudder deflection without thrust)
+                           1000.0]) # stern steering authority (lower: VBS/LCG provide alternative depth control)
         Q = np.diag(Q_diag)
 
 
@@ -104,8 +108,8 @@ class NMPC:
         p_sym = ca.MX.sym("p", n_params)
         self.model.p = p_sym
 
-        self.n_stage_cost = 8 + self.nu   # 8 MPCC residuals + 7 control rates = 15
-        self.n_terminal_cost = 8 + 1       # 8 MPCC residuals + heave velocity
+        self.n_stage_cost = 10 + self.nu   # 10 MPCC residuals + 7 control rates = 17
+        self.n_terminal_cost = 10 + 1       # 10 MPCC residuals + heave velocity
 
         # We have the cost defined in the model.
         self.ocp.cost.yref = np.zeros((self.n_stage_cost,))
@@ -482,10 +486,12 @@ class NMPC:
         Compute the stage or terminal cost residual.
 
         Stage  (terminal=False):
-          [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), u_phys(6), delta_v_theta(1)] = 15
+          [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1),
+           e_rudder_auth(1), e_stern_auth(1), u_phys(6), delta_v_theta(1)] = 17
 
         Terminal (terminal=True):
-          [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1), heave_vel(1)] = 9
+          [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1),
+           e_rudder_auth(1), e_stern_auth(1), heave_vel(1)] = 11
 
         p vector layout (set in DiveControllerMPC.update):
           p[0 : nx]            = state ref   (nx = 21)
@@ -567,14 +573,29 @@ class NMPC:
         v_along = x[7] * cos_align
         e_sync = v_theta - v_along
 
+        # Steering-authority coupling: penalises rudder/stern deflection when
+        # RPMs are too low to produce thrust (thrust-vectoring is SAM's only
+        # steering mechanism — without propeller wash, deflection is useless).
+        #
+        # deficit ≈ 1 at zero RPM, ≈ 0 above the deadzone.  The solver can
+        # reduce this cost by either keeping RPMs above rpm_dz (preferred when
+        # cross-track error exists) or zeroing deflection (when on-track).
+        rpm_auth_dz = 220.0
+        rpm_avg_sq = (x[17]**2 + x[18]**2) / 2.0
+        steer_deficit = ca.exp(-3.0 * rpm_avg_sq / rpm_auth_dz**2)
+        e_rudder_auth = x[16] * steer_deficit
+        e_stern_auth = x[15] * steer_deficit
+
         if terminal:
             return ca.vertcat(
                 e_c_vec, e_l, v_theta, e_heading, e_pitch, e_sync,
+                e_rudder_auth, e_stern_auth,
                 x[9],
             )
         else:
             return ca.vertcat(
                 e_c_vec, e_l, v_theta, e_heading, e_pitch, e_sync,
+                e_rudder_auth, e_stern_auth,
                 u[:self.N_PHYS_CONTROLS], u[self.N_PHYS_CONTROLS],
             )
 
