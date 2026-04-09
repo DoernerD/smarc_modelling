@@ -69,8 +69,8 @@ class NMPC:
                            1500.0, #600.0,   # heading yaw alignment (atan2, signed radians, decoupled from pitch)
                            200.0,   # pitch alignment (soft trim guide; contour-z drives depth)
                            400.0,   # v_theta-to-vehicle-velocity synchronization
-                           3000.0,  # rudder steering authority (penalises rudder deflection without thrust)
-                           1000.0]) # stern steering authority (lower: VBS/LCG provide alternative depth control)
+                           0.0, #previous: 3000.0,  # rudder steering authority (penalises rudder deflection without thrust)
+                           0.0]) #previous: 1000.0]) # stern steering authority (lower: VBS/LCG provide alternative depth control)
         Q = np.diag(Q_diag)
 
 
