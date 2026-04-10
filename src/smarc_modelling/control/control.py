@@ -235,7 +235,7 @@ class NMPC:
         # Gradient at rpm = 0 is zero (flat saddle), so the solver can freely
         # transit through 0 during direction switches (e.g. reverse thrust
         # for braking).  No penalty barrier blocks the sign change.
-        rpm_dz = 220.0  # above nominal 200 RPM hardware deadzone
+        rpm_dz = 300.0  # above nominal 200 RPM hardware deadzone
         t1 = self.model.x[17] / rpm_dz
         t2 = self.model.x[18] / rpm_dz
         h_dz1 = t1**2 * (1.0 - t1**2)
@@ -289,7 +289,7 @@ class NMPC:
         # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), a smooth polynomial in
         # quaternion components — avoids arcsin singularities and gives the SQP
         # well-behaved gradients everywhere.
-        self.pitch_max_deg = 30.0 # allows moderate dives; protects DR at extreme angles
+        self.pitch_max_deg = 45.0 #30.0 # allows moderate dives; protects DR at extreme angles
         sin_pitch_max = np.sin(np.deg2rad(self.pitch_max_deg))
         q0_c = self.model.x[3]
         q1_c = self.model.x[4]
@@ -580,7 +580,7 @@ class NMPC:
         # deficit ≈ 1 at zero RPM, ≈ 0 above the deadzone.  The solver can
         # reduce this cost by either keeping RPMs above rpm_dz (preferred when
         # cross-track error exists) or zeroing deflection (when on-track).
-        rpm_auth_dz = 220.0
+        rpm_auth_dz = 300.0
         rpm_avg_sq = (x[17]**2 + x[18]**2) / 2.0
         steer_deficit = ca.exp(-3.0 * rpm_avg_sq / rpm_auth_dz**2)
         e_rudder_auth = x[16] * steer_deficit
