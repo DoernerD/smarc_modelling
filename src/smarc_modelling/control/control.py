@@ -550,7 +550,11 @@ class NMPC:
         # equilibrium like the sin cross-product).
         h_dot = fwd_x * t_hat[0] + fwd_y * t_hat[1]
         h_cross = fwd_x * t_hat[1] - fwd_y * t_hat[0]
-        e_heading = ca.atan2(h_cross, h_dot)
+        #e_heading = ca.atan2(h_cross, h_dot)
+        
+        # sin based error with max penalty at 90 degrees, but 0 at 0 degrees and 180 degrees
+        e_heading = h_cross / ca.sqrt(h_cross**2 + h_dot**2 + 1e-6)
+
         
         # Old version
         #fwd_h_norm = ca.sqrt(fwd_x**2 + fwd_y**2 + 1e-6)
@@ -562,7 +566,11 @@ class NMPC:
         # sin(pitch_ref) = -t_hat[2] (from the path tangent).
         # Unlike 1-cos (quartic near zero), this has a LINEAR gradient for
         # small pitch errors, giving the solver real incentive to level out.
-        e_pitch = (-fwd_z) - (-t_hat[2])
+        #e_pitch = (-fwd_z) - (-t_hat[2])
+        
+        # When going backwards, we might want a different pitch angle
+        smooth_sign = cos_align / ca.sqrt(cos_align**2 + 1e-4)
+        e_pitch = smooth_sign * (-fwd_z) - (-t_hat[2])
 
         # v_theta: set yref[4] = v_target to pull progress speed toward v_target.
         v_theta = x[self.N_PHYS_STATES + 1]   # x[20]
