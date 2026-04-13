@@ -289,7 +289,7 @@ class NMPC:
         # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), a smooth polynomial in
         # quaternion components — avoids arcsin singularities and gives the SQP
         # well-behaved gradients everywhere.
-        self.pitch_max_deg = 45.0 #30.0 # allows moderate dives; protects DR at extreme angles
+        self.pitch_max_deg = 30.0 #45.0 #30.0 # allows moderate dives; protects DR at extreme angles
         sin_pitch_max = np.sin(np.deg2rad(self.pitch_max_deg))
         q0_c = self.model.x[3]
         q1_c = self.model.x[4]
