@@ -219,8 +219,8 @@ class NMPC:
             + 1e-4  # numerical safety to avoid sqrt(0)
         )
         # h(x) = v_surge^2 - 2*a_brake*(d+d_eps) <= 0  (upper bound = 0)
-        brake_h = self.model.x[7] ** 2 - 2.0 * a_brake * (dist_to_goal + d_eps)
-
+        speed_sq = self.model.x[7]**2 + self.model.x[8]**2 + self.model.x[9]**2
+        brake_h = speed_sq - 2.0 * a_brake * (dist_to_goal + d_eps)
         # ----- RPM Deadzone Avoidance (distance-independent) ----------------------
         # SAM thrusters have a ~200 RPM deadzone where no thrust is produced.
         # The exact boundary varies with water speed, prop loading, etc.
@@ -540,46 +540,45 @@ class NMPC:
         fwd_x = 1 - 2 * (q2_s**2 + q3_s**2)
         fwd_y = 2 * (q1_s * q2_s + q0_s * q3_s)
         fwd_z = 2 * (q1_s * q3_s - q0_s * q2_s)
-        cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
-        # Yaw-only heading: atan2(cross, dot) of horizontal projections.
-        # Returns the signed yaw error in radians, decoupled from pitch.
-        # Unlike 1-cos which has zero Jacobian at 0° (no directional signal
-        # for the SQP linearization, causing random left/right drift),
-        # atan2 has a linear gradient at small errors AND is monotonic
-        # over (-180°, 180°) with maximum cost at 180° (no spurious
-        # equilibrium like the sin cross-product).
+        cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1]
+
         h_dot = fwd_x * t_hat[0] + fwd_y * t_hat[1]
         h_cross = fwd_x * t_hat[1] - fwd_y * t_hat[0]
-        #e_heading = ca.atan2(h_cross, h_dot)
-        
-        # sin based error with max penalty at 90 degrees, but 0 at 0 degrees and 180 degrees
-        e_heading = h_cross / ca.sqrt(h_cross**2 + h_dot**2 + 1e-6)
 
-        
-        # Old version
-        #fwd_h_norm = ca.sqrt(fwd_x**2 + fwd_y**2 + 1e-6)
-        #t_h_norm = ca.sqrt(t_hat[0]**2 + t_hat[1]**2 + 1e-6)
-        #e_heading = 1 - h_dot / (fwd_h_norm * t_h_norm)
-
-        # Pitch alignment: sin(pitch_state) - sin(pitch_ref).
-        # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), smooth polynomial in quaternion.
-        # sin(pitch_ref) = -t_hat[2] (from the path tangent).
-        # Unlike 1-cos (quartic near zero), this has a LINEAR gradient for
-        # small pitch errors, giving the solver real incentive to level out.
-        #e_pitch = (-fwd_z) - (-t_hat[2])
-        
-        # When going backwards, we might want a different pitch angle
         smooth_sign = cos_align / ca.sqrt(cos_align**2 + 1e-4)
-        e_pitch = smooth_sign * (-fwd_z) - (-t_hat[2])
+
+        t_horiz = ca.sqrt(t_hat[0]**2 + t_hat[1]**2 + 1e-8)
+
+        # Heading: only meaningful when tangent has a horizontal component
+        e_heading = t_horiz * (h_cross / ca.sqrt(h_cross**2 + h_dot**2 + 1e-6))
+
+        # Pitch: don't force nose-down for vertical segments
+        e_pitch = t_horiz * (smooth_sign * (-fwd_z) - (-t_hat[2]))
 
         # v_theta: set yref[4] = v_target to pull progress speed toward v_target.
         v_theta = x[self.N_PHYS_STATES + 1]   # x[20]
 
-        # Surge velocity projected onto path tangent.  Couples v_theta to
-        # actual vehicle motion so the solver cannot advance theta without
-        # producing physical velocity (the root cause of the no-movement bug).
-        v_along = x[7] * cos_align
+        # Right axis (y-column of rotation matrix)
+        right_x = 2 * (q1_s * q2_s - q0_s * q3_s)
+        right_y = 1 - 2 * (q1_s**2 + q3_s**2)
+        right_z = 2 * (q2_s * q3_s + q0_s * q1_s)
+
+        # Down axis (z-column of rotation matrix)
+        down_x = 2 * (q1_s * q3_s + q0_s * q2_s)
+        down_y = 2 * (q2_s * q3_s - q0_s * q1_s)
+        down_z = 1 - 2 * (q1_s**2 + q2_s**2)
+
+        # Body velocities
+        u_body, v_body, w_body = x[7], x[8], x[9]
+
+        # Each body axis projected onto tangent
+        fwd_proj   = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]  # = cos_align
+        right_proj = right_x * t_hat[0] + right_y * t_hat[1] + right_z * t_hat[2]
+        down_proj  = down_x * t_hat[0] + down_y * t_hat[1] + down_z * t_hat[2]
+
+        v_along = u_body * fwd_proj + v_body * right_proj + w_body * down_proj
         e_sync = v_theta - v_along
+        
 
         # Steering-authority coupling: penalises rudder/stern deflection when
         # RPMs are too low to produce thrust (thrust-vectoring is SAM's only
