@@ -69,8 +69,8 @@ class NMPC:
                            1500.0, #600.0,   # heading yaw alignment (atan2, signed radians, decoupled from pitch)
                            200.0,   # pitch alignment (soft trim guide; contour-z drives depth)
                            400.0,   # v_theta-to-vehicle-velocity synchronization
-                           0.0, #previous: 3000.0,  # rudder steering authority (penalises rudder deflection without thrust)
-                           0.0]) #previous: 1000.0]) # stern steering authority (lower: VBS/LCG provide alternative depth control)
+                           3000.0, #previous: 3000.0,  # rudder steering authority (penalises rudder deflection without thrust)
+                           1000.0]) #previous: 1000.0]) # stern steering authority (lower: VBS/LCG provide alternative depth control)
         Q = np.diag(Q_diag)
 
 
@@ -265,7 +265,7 @@ class NMPC:
         self.model.e_c_vec = _pos_diff - _e_l * _t_hat
 
         h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
-        self.r_track = 3.0  # [m] wide tube to accommodate multi-point turn deviations
+        self.r_track = 1.0  # [m] wide tube to accommodate multi-point turn deviations
         self.IDX_TRACK = 3  # index of h_track inside con_h for dynamically updating track radius
 
         # ----- Wall-lock parameters ---------------------------------------------------
@@ -550,10 +550,10 @@ class NMPC:
         # equilibrium like the sin cross-product).
         h_dot = fwd_x * t_hat[0] + fwd_y * t_hat[1]
         h_cross = fwd_x * t_hat[1] - fwd_y * t_hat[0]
-        #e_heading = ca.atan2(h_cross, h_dot)
+        e_heading = ca.atan2(h_cross, h_dot)
         
         # sin based error with max penalty at 90 degrees, but 0 at 0 degrees and 180 degrees
-        e_heading = h_cross / ca.sqrt(h_cross**2 + h_dot**2 + 1e-6)
+        #e_heading = h_cross / ca.sqrt(h_cross**2 + h_dot**2 + 1e-6)
 
         
         # Old version
@@ -566,11 +566,11 @@ class NMPC:
         # sin(pitch_ref) = -t_hat[2] (from the path tangent).
         # Unlike 1-cos (quartic near zero), this has a LINEAR gradient for
         # small pitch errors, giving the solver real incentive to level out.
-        #e_pitch = (-fwd_z) - (-t_hat[2])
+        e_pitch = (-fwd_z) - (-t_hat[2])
         
         # When going backwards, we might want a different pitch angle
-        smooth_sign = cos_align / ca.sqrt(cos_align**2 + 1e-4)
-        e_pitch = smooth_sign * (-fwd_z) - (-t_hat[2])
+        #smooth_sign = cos_align / ca.sqrt(cos_align**2 + 1e-4)
+        #e_pitch = smooth_sign * (-fwd_z) - (-t_hat[2])
 
         # v_theta: set yref[4] = v_target to pull progress speed toward v_target.
         v_theta = x[self.N_PHYS_STATES + 1]   # x[20]
