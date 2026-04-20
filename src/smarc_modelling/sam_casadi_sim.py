@@ -8,7 +8,8 @@ from smarc_modelling.lib import *
 from smarc_modelling.vehicles import *
 from smarc_modelling.vehicles.SAM_casadi import SAM_casadi
 
-matplotlib.use("Qt5Agg")  # or 'Qt5Agg', depending on what you have installed
+matplotlib.use('TkAgg')  # or 'Qt5Agg', depending on what you have installed
+#matplotlib.use("Qt5Agg")  # or 'Qt5Agg', depending on what you have installed
 
 # Initial conditions
 eta0 = np.zeros(7)
@@ -61,11 +62,11 @@ def run_simulation(t_span, x0, dt, sam):
     """
 
     u = np.zeros(6)
-    u[0] = 50  # *np.sin((i/(20/0.02))*(3*np.pi/4))        # VBS
-    u[1] = 50  # LCG
+    u[0] = 0  # *np.sin((i/(20/0.02))*(3*np.pi/4))        # VBS
+    u[1] = 100  # LCG
     u[2] = 0  # np.deg2rad(7)    # Vertical (stern)
-    u[3] = -np.deg2rad(7)  # Horizontal (rudder)
-    u[4] = 1000     # RPM 1
+    u[3] = 0 #-np.deg2rad(7)  # Horizontal (rudder)
+    u[4] = 0     # RPM 1
     u[5] = u[4]  # RPM 2
 
     # Run integration
