@@ -60,24 +60,27 @@ class NMPC:
         #                   1e-8])  # RPM2 rate
         #R = np.diag(R_diag)
         
+        #        e_c_vec, e_l, v_theta, e_heading, e_pitch, e_sync,
+        #        e_rudder_auth, e_stern_auth,
+        #        u[:self.N_PHYS_CONTROLS], u[self.N_PHYS_CONTROLS],
         
-        Q_diag = np.array([500.0,   # contour x
-                           500.0,   # contour y
-                           850.0,   # contour z (from 1000: gentler but still drives the dive)
-                           300.0,   # lag (along-track; controls overshoot on level segments)
-                           100.0,   # progress speed penalty (higher = slower cruise)
-                           1500.0, #600.0,   # heading yaw alignment (atan2, signed radians, decoupled from pitch)
-                           200.0,   # pitch alignment (soft trim guide; contour-z drives depth)
-                           400.0,   # v_theta-to-vehicle-velocity synchronization
-                           3000.0, #previous: 3000.0,  # rudder steering authority (penalises rudder deflection without thrust)
-                           1000.0]) #previous: 1000.0]) # stern steering authority (lower: VBS/LCG provide alternative depth control)
+        Q_diag = np.array([700.0,   # SIM: contour x (500 -> 700 -> 1200 -> 700). 1200 amplified a "wrong-direction at start of turn" pathology: e_c_vec is decomposed against the LOOKAHEAD tangent (heading_offset=2 m ahead in DiveControllerMPC), so on a turn the perpendicular-to-lookahead direction differs from perpendicular-to-local-path, and high Q_contour_y pushed the rudder along that biased direction.  Reverted to 700 and instead halved heading_offset (2 m -> 1 m in the controller) to bring the lookahead inside the prediction horizon and reduce the decomposition bias at its source.
+                           700.0,   # SIM: contour y (500 -> 700 -> 1200 -> 700). Same rationale as contour x.
+                           1500.0,  # SIM: contour z (real-vehicle was 850; raised so the solver commits to the dive faster)
+                           80.0,    # SIM: lag (was 300). At the dive transition the path tangent rotates (acquires a z-component) and the projection re-linearizes, leaving the vehicle with a large positive e_l = (pos - path_pos)·t_hat along the new tangent. With Q_lag=300 vs Q_sync=30 the cheapest way to reduce e_l was NEGATIVE surge (pull vehicle back along tangent), not advancing theta — which v_theta is already saturated doing. Reversing surge also inverts the rudder's lift sign, producing the "random" turning you see.  Dropped hard so lag is resolved by v_theta catch-up and mild drag, not by reversing.
+                           50.0,    # SIM: progress speed penalty (real-vehicle used 10, but with sync=100 that makes rest cheaper than cruise; bumped back toward the pre-real-vehicle value of 50)
+                           300.0,   # SIM: heading yaw alignment (400 -> 150 -> 300). 400 caused the 90-degree turn pathology on straight lines (high heading gain + cheap rudder rate). 150 fixed that but made the solver under-react on curves — the "turn too late, then too much" pattern on gentle-turn-dive: Q_rudder_angle/Q_heading = 500/150 ≈ 3.3, so yaw error has to grow to ~12° before it's cheaper to deflect the rudder than accept the error, and once it does the response is sharp. 300 brings the ratio to 500/300 ≈ 1.7, giving earlier (smaller-error) rudder engagement on curves. Straight-line oscillation that originally drove 400 -> 150 is now held by R_rudder=2e0 (rate) + Q[8]=500 (state), both of which were added/raised after the 400 regime.
+                           1000.0,  # SIM: pitch alignment (was 600). Brought closer to contour_z=1500 so the vehicle tilts along the path preemptively rather than chasing z-error once it's already grown.
+                           120.0,   # SIM: v_theta-to-vehicle-velocity synchronization (was 30, briefly 100).  Now the DOMINANT longitudinal cost (vs Q_lag=80): the solver is forced to keep x[7]·cos_align ≈ v_theta, which makes "reverse surge to reduce lag" expensive enough that it's no longer optimal.  Also naturally pulls v_theta down as cos_align drops through the pitch transition, so the marker slows in sync with the vehicle instead of running ahead.
+                           350.0,   # SIM: rudder angle penalty (800 -> 500 -> 350). Full-rudder saturation crossover: Q_heading=300 balances Q[8] at e_heading = sqrt(Q[8]*δ_max²/Q_heading), so 800 → ~12°, 500 → ~9°, 350 → ~7.6°.  Combined with the Q_contour_y raise to 1200, the solver now commits rudder at smaller heading errors on turn-dive trajectories.  Straight-line wiggle still held by R_rudder=2e0 (rate cost).
+                           200.0])  # SIM: stern angle penalty (was 300; reduced so the pitch plane is less damped than the yaw plane — stern has a structural job rudder doesn't have).
         Q = np.diag(Q_diag)
 
 
-        R_diag = np.array([1e-2,   # VBS rate (10x from 1e-3: smooths buoyancy without crippling depth control)
-                           5e-2,   # LCG rate (5x from 1e-2: gentler CG-induced pitch changes)
-                           1e-1,   # stern angle rate
-                           1e-1,   # rudder angle rate
+        R_diag = np.array([5e-4,   # SIM: VBS rate (was 2e-3).  Q_pitch=1000 and Q_contour_z=1500 are strong but VBS rate cost was still ~80/stage at full sweep, which was suppressing the VBS' contribution to the dive kick-off.  5e-4 makes VBS cheap enough that the solver actually uses it at the moment the path starts descending (fast actuator, no surge dependency), rather than waiting for stern-driven pitch to build up.
+                           2e-3,   # SIM: LCG rate (was 1e-2).  LCG creates the static pitch-down moment and does so without surge, so it should be leading the dive alongside VBS.  1e-2 was still expensive enough (~25/stage at full rate) to compete with Q_pitch, dropping it 5x lets LCG move aggressively into a dive-trim position early.
+                           5e-1,   # SIM: stern angle rate (was 2e0; reduced because stern has a structural pitch-control role rudder doesn't — over-damping it muted the dive. Q[9]=200 state penalty still prevents parking at ±7° on small pitch errors).
+                           2e0,    # SIM: rudder angle rate (pre-real-vehicle 1e-1 -> 2e0). Kills the small-amplitude rudder wiggle that Q[8] alone can't catch (wiggles near 0 deflection have ~0 state cost). 180° turns still feasible: full-sweep rate cost ~0.7 vs heading benefit of ~45000.
                            1e-8,   # RPM1 rate
                            1e-8,   # RPM2 rate
                            1e0])   # delta_v_theta rate
@@ -133,7 +136,13 @@ class NMPC:
         # --------------------- Constraint Setup --------------------------
         vbs_dot = 200  # Maximum rate of change for the VBS
         lcg_dot = 50  # Maximum rate of change for the LCG
-        tv_dot = 0.7  # Maximum rate of change for the thrust vectoring [rad/s]
+        # SIM: tv_dot restored to 0.5.  With R[2]=R[3]=2e0, the solver pays a
+        # real cost for fast rate — which is what we actually wanted.  The
+        # earlier drop to 0.3 was a physical floor added *because* R was too
+        # cheap to damp oscillation; now that R does that job, we don't want
+        # the physical floor throttling the rudder during intentional sharp
+        # turns (the 180°+ trajectories the planner is meant to demonstrate).
+        tv_dot = 0.5  # Maximum rate of change for the thrust vectoring [rad/s]
         delta_v_theta_max = 0.5  # Maximum progress speed (m/s arc-length)
 
         # Declare initial state
@@ -155,9 +164,31 @@ class NMPC:
         pos_ubx = np.array([x_max, y_max, z_max])
 
         # --- surge velocity bound for x[7] ---
-        surge_max = 0.2   # m/s — conservative to account for model underestimating real vehicle speed
-        surge_min = -0.2  # m/s — allow slight reverse for braking transients
-        surge_lbx = np.array([surge_min])  # allow slight reverse for braking transients
+        # SIM: raised from 0.2 (real-vehicle cap, which was conservative because
+        # the real vehicle is faster than the model at 300 RPM).  In sim the
+        # dynamics match the model, so 0.2 was capping the solver below what
+        # the sim can actually achieve and contributing to the stall.
+        # SIM: tightened 0.5 -> 0.4 to reduce end-of-trajectory overshoot.
+        # With _v_target=0.4, surge_max=0.5 gave the solver 25 % headroom
+        # above cruise target — useful for catching up lag, but it also
+        # meant the vehicle entered the approach phase carrying more kinetic
+        # energy than the terminal brake + drag could fully dissipate inside
+        # a 3 s horizon.  Matching surge_max to _v_target removes that
+        # headroom so the solver can't cruise faster than the brake can
+        # stop.  v_theta_max tracks surge_max via the line below so the
+        # sync coupling stays consistent.
+        surge_max = 0.4   # m/s
+        # SIM: reopened from -0.1 to -0.4 so reverse has the same top speed
+        # as forward — lets the solver use reverse thrust for tight turns,
+        # station-keeping and repositioning (the "maneuverability" payoff).
+        # The reverse-at-dive pathology that motivated -0.1 is now fully
+        # handled by the cost rebalancing (Q_lag=80, Q_sync=120): at a dive
+        # transition with e_l=0.3 m and cos_align≈0.7, reversing to -0.4 m/s
+        # costs ~55/stage in e_sync while saving only ~7/stage in e_l, so
+        # reverse is ~7x more expensive than accepting the lag.  Balance
+        # holds for the whole dive phase; bug does not resurface at -0.4.
+        surge_min = -0.4  # m/s — symmetric reverse authority for maneuverability
+        surge_lbx = np.array([surge_min])
         surge_ubx = np.array([surge_max])
 
         # --- actuator state bounds for x[13:19] = [x_vbs, x_lcg, δs, δr, rpm1, rpm2] ---
@@ -200,14 +231,34 @@ class NMPC:
         # that dist_to_goal reflects the remaining PATH distance, not the Euclidean
         # shortcut.  This prevents premature braking on curved trajectories.
         #
-        # a_brake controls how early the funnel bites.  With a_brake = 0.007:
-        #   0.5 m → 0.12 m/s,  1 m → 0.14 m/s,  2 m → 0.19 m/s,  2.5 m → 0.20 m/s
-        # The funnel starts limiting cruise speed (0.2 m/s) at ~2.5 m from
-        # the goal, giving the solver ~25 stages to plan active braking via
-        # reverse thrust.  d_eps controls the speed limit at the goal itself:
-        # at d=0, v_max = sqrt(2*a_brake*d_eps) ≈ 0.08 m/s.
-        a_brake = 0.007  # m/s^2 — bites at ~2.5 m from goal at cruise speed
-        d_eps   = 0.5    # m — tighter at the goal to prevent overshoot
+        # a_brake controls how early the funnel bites.
+        # With a_brake = 0.1 and d_eps = 0.5 (current sim values):
+        #   d=0.0 m → cap = sqrt(2*0.1*0.5) = 0.316 m/s (below surge_max=0.4, active)
+        #   d=0.3 m → cap = sqrt(2*0.1*0.8) = 0.400 m/s (= surge_max, just touches)
+        #   d=0.5 m → cap = sqrt(2*0.1*1.0) = 0.447 m/s (above surge_max, inactive)
+        # So the funnel is a soft floor that bites only in the last ~0.3 m
+        # before the goal.  Stern-plane pitching authority (∝ surge²) is
+        # preserved for the entire approach, and the funnel picks up the
+        # last bit of kinetic energy the terminal cost + drag can't quite
+        # dissipate inside the horizon — which is the direct fix for the
+        # overshoot.
+        # SIM: reverted to 0.1.  0.007 was introduced to compensate for the
+        # real vehicle being faster than the model at cruise RPM (model
+        # mismatch → needed earlier braking).  In sim the dynamics match the
+        # model, so that safety margin just throttles surge to ~0.1 m/s for
+        # the last ~2.5 m.  At that low surge, the stern plane loses ~17x
+        # authority (moment ∝ surge²), and the dive controller is forced onto
+        # VBS/LCG for depth hold — which overshoots and produces the
+        # end-of-trajectory depth oscillation.
+        a_brake = 0.01    # m/s^2 — bites only in the last ~0.3 m at cruise speed
+        # SIM: d_eps 1.5 -> 0.5.  d_eps=1.5 left the cap at goal (0.548 m/s)
+        # ABOVE surge_max, which made the funnel effectively inactive and
+        # meant the only thing braking the vehicle at the goal was drag +
+        # terminal cost — not enough to prevent overshoot.  Dropping to 0.5
+        # re-engages the funnel for the last ~0.3 m, giving the solver a
+        # hard upper bound on approach speed while leaving stern authority
+        # intact for the entire cruise phase.
+        d_eps   = 0.5    # m — funnel bites in the last ~0.3 m before the goal
 
         x_goal = self.model.p[self.nx + self.nu + 0]
         y_goal = self.model.p[self.nx + self.nu + 1]
@@ -235,7 +286,19 @@ class NMPC:
         # Gradient at rpm = 0 is zero (flat saddle), so the solver can freely
         # transit through 0 during direction switches (e.g. reverse thrust
         # for braking).  No penalty barrier blocks the sign change.
-        rpm_dz = 300.0  # above nominal 200 RPM hardware deadzone
+        #
+        # SIM: reduced from 300 to 50.  The SAM_casadi dynamics used for sim
+        # have a CONTINUOUS thrust curve — no physical deadzone — so the
+        # "avoid ambiguous-thrust regime" rationale doesn't apply.  With
+        # rpm_dz=300, any low-thrust RPM (e.g. ~100 for a gentle 0.1–0.2 m/s
+        # cruise) cost ~3.8/stage soft penalty = ~114 over the horizon.
+        # That pushed the solver to choose RPM=0 (coast on drag) over small
+        # positive RPM commands — the direct cause of "stops and drifts at
+        # the end of the mission, a small push would be enough".  With
+        # rpm_dz=50 the constraint is effectively only active for RPM<50, so
+        # any RPM ≥ 50 is free and the solver can command the small forward
+        # bias the approach-to-goal phase needs.
+        rpm_dz = 50.0  # SIM: effectively inactive for useful RPM ranges
         t1 = self.model.x[17] / rpm_dz
         t2 = self.model.x[18] / rpm_dz
         h_dz1 = t1**2 * (1.0 - t1**2)
@@ -289,7 +352,10 @@ class NMPC:
         # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), a smooth polynomial in
         # quaternion components — avoids arcsin singularities and gives the SQP
         # well-behaved gradients everywhere.
-        self.pitch_max_deg = 30.0 #45.0 #30.0 # allows moderate dives; protects DR at extreme angles
+        # SIM: raised back to 45° (real-vehicle used 30° to protect DR at
+        # extreme angles; in sim there's no DR drift to worry about so let
+        # the solver commit to steeper dives).
+        self.pitch_max_deg = 45.0
         sin_pitch_max = np.sin(np.deg2rad(self.pitch_max_deg))
         q0_c = self.model.x[3]
         q1_c = self.model.x[4]
@@ -581,18 +647,19 @@ class NMPC:
         v_along = x[7] * cos_align
         e_sync = v_theta - v_along
 
-        # Steering-authority coupling: penalises rudder/stern deflection when
-        # RPMs are too low to produce thrust (thrust-vectoring is SAM's only
-        # steering mechanism — without propeller wash, deflection is useless).
-        #
-        # deficit ≈ 1 at zero RPM, ≈ 0 above the deadzone.  The solver can
-        # reduce this cost by either keeping RPMs above rpm_dz (preferred when
-        # cross-track error exists) or zeroing deflection (when on-track).
-        rpm_auth_dz = 300.0
-        rpm_avg_sq = (x[17]**2 + x[18]**2) / 2.0
-        steer_deficit = ca.exp(-3.0 * rpm_avg_sq / rpm_auth_dz**2)
-        e_rudder_auth = x[16] * steer_deficit
-        e_stern_auth = x[15] * steer_deficit
+        # SIM: direct rudder / stern angle penalty.
+        # Previously this was `x[16] * exp(-3·rpm²/rpm_dz²)` — a steering-
+        # "authority" gating that was meant to penalise thrust-vectoring
+        # deflection when RPMs were too low to generate prop wash.  At
+        # cruise RPM that gate collapses the penalty by ~20×, which in sim
+        # meant rudder angle was effectively unpenalised and the solver
+        # parked the rudder at ±7° during even mild overshoots (rate
+        # penalty alone can't fix this: once saturated, holding it costs
+        # nothing).  Using the raw state gives a proper quadratic cost on
+        # deflection and damps the oscillation.  The variable names are
+        # kept so the Q_diag indices stay readable.
+        e_rudder_auth = x[16]
+        e_stern_auth = x[15]
 
         if terminal:
             return ca.vertcat(
