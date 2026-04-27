@@ -39,9 +39,9 @@ class NMPC:
         #
         # Residual layout
         #   Stage:    [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1),
-        #              e_rudder_auth(1), e_stern_auth(1), u_phys(6), delta_v_theta(1)] = 17
+        #              e_rudder_auth(1), e_stern_auth(1), yaw_rate(1), u_phys(6), delta_v_theta(1)] = 18
         #   Terminal: [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1),
-        #              e_rudder_auth(1), e_stern_auth(1)] = 10
+        #              e_rudder_auth(1), e_stern_auth(1), yaw_rate(1), heave_vel(1)] = 12
 
         # Stage Q: contour(3) + lag(1) + heading(1) + v_theta(1) = 6
         #Q_diag = np.array([1000.0, 1000.0, 1000.0,   # contour (cross-track)
@@ -72,8 +72,60 @@ class NMPC:
                            300.0,   # SIM: heading yaw alignment (400 -> 150 -> 300). 400 caused the 90-degree turn pathology on straight lines (high heading gain + cheap rudder rate). 150 fixed that but made the solver under-react on curves — the "turn too late, then too much" pattern on gentle-turn-dive: Q_rudder_angle/Q_heading = 500/150 ≈ 3.3, so yaw error has to grow to ~12° before it's cheaper to deflect the rudder than accept the error, and once it does the response is sharp. 300 brings the ratio to 500/300 ≈ 1.7, giving earlier (smaller-error) rudder engagement on curves. Straight-line oscillation that originally drove 400 -> 150 is now held by R_rudder=2e0 (rate) + Q[8]=500 (state), both of which were added/raised after the 400 regime.
                            1000.0,  # SIM: pitch alignment (was 600). Brought closer to contour_z=1500 so the vehicle tilts along the path preemptively rather than chasing z-error once it's already grown.
                            120.0,   # SIM: v_theta-to-vehicle-velocity synchronization (was 30, briefly 100).  Now the DOMINANT longitudinal cost (vs Q_lag=80): the solver is forced to keep x[7]·cos_align ≈ v_theta, which makes "reverse surge to reduce lag" expensive enough that it's no longer optimal.  Also naturally pulls v_theta down as cos_align drops through the pitch transition, so the marker slows in sync with the vehicle instead of running ahead.
-                           350.0,   # SIM: rudder angle penalty (800 -> 500 -> 350). Full-rudder saturation crossover: Q_heading=300 balances Q[8] at e_heading = sqrt(Q[8]*δ_max²/Q_heading), so 800 → ~12°, 500 → ~9°, 350 → ~7.6°.  Combined with the Q_contour_y raise to 1200, the solver now commits rudder at smaller heading errors on turn-dive trajectories.  Straight-line wiggle still held by R_rudder=2e0 (rate cost).
-                           200.0])  # SIM: stern angle penalty (was 300; reduced so the pitch plane is less damped than the yaw plane — stern has a structural job rudder doesn't have).
+                           500.0,   # SIM: rudder angle penalty (800 -> 500 -> 350 -> 500). Full-rudder saturation crossover: Q_heading=300 balances Q[8] at e_heading = sqrt(Q[8]*δ_max²/Q_heading), so 800 → ~12°, 500 → ~9°, 350 → ~7.6°.  Raised 350 -> 500 to tame post-pivot oversteer on the 180°-return trajectory: with Q[8]=350 the solver saturated the rudder at yaw errors as small as 7.6°, which combined with the residual lateral offset after the pivot was enough to slam the nose past the tangent and then oscillate.  At Q[8]=500 the saturation crossover moves to ~9°, so the solver uses PARTIAL rudder (proportional response) through the 5–9° regime where recovery happens, giving the heading loop time to converge smoothly instead of bang-banging.  Earlier 350 value was chosen to get aggressive rudder engagement on gentle-turn-dive curves; the 180°-return trajectory reveals that the same aggressiveness causes recovery overshoot.  If future trajectories require the earlier-engagement behaviour again, this can be split into a trajectory-adaptive weight, but the 500 value still commits full rudder by ~9° so curve tracking should remain acceptable.  Straight-line wiggle still held by R_rudder=2e0 (rate cost).
+                           200.0,   # SIM: stern angle penalty (was 300; reduced so the pitch plane is less damped than the yaw plane — stern has a structural job rudder doesn't have).
+                           20.0])   # SIM: yaw-rate (x[12] = r) damping (30 -> 10 -> 20).  30 was chosen to tame the monotonic over-rotation pathology at trace row 177 (yaw_err growing -107°->-113° with restoring rudder saturated), and it DID help there: track-slack biting ticks dropped 1562/2378 -> 971/2265 (66% -> 43%) and the old bang-bang rudder recovery signature disappeared.  But it introduced a new regime: 135/2265 (6%) of ticks at |yaw_err|>120°, compared to 0/2378 in the no-damping run.  Mechanism: at Q_r=30, holding a perturbed heading with zero yaw rate is cheaper than rotating back through a yaw-rate burst, so the solver settles into extreme-yaw equilibria (observed at row 686: yaw_err stable at -144° for 5 consecutive ticks, full-reverse commanded) instead of bang-bang recovering.  The "orientation suddenly 90° then goes straight again" observation on the dive segment matches this: a small heading perturbation is now cheaper to hold than to correct quickly.  10 is the minimum value still expected to prevent row-177-style runaway (at r=2 rad/s it contributes 40/stage, comparable to Q_sync at v_along error), while being weak enough that rotating through a moderate yaw-rate burst (~1 rad/s, cost = 10/stage) is preferred over sitting at large heading error (Q_heading * π² ≈ 3000/stage if stuck near ±π).  If |yaw|>120° ticks return, the next knob is bumping R_rudder rate from 2e0 to 4e0 (slows bang-bang rudder without adding a state-hold attractor) rather than raising Q_r back.  10 -> 20 (180°-return-y0 trajectory): the |yaw|>120° regime returned, but as a pure end-of-trajectory hover-spin rather than a transient — once theta locks near theta_total - 0.7 with the body 1 m cross-track of the final WP (mpcc_run_1777064774 row 1700+), yaw monotonically spins through 360° while drifting around at low surge.  This is the cheap-state-hold equilibrium the original Q_r=30 comment described.  Going to 20 (not back to 30) because the row-177 dive pathology that originally drove 30 -> 10 was on a different trajectory; 20 keeps the rotation-through-yaw-rate-burst cost at 20/stage at r=1 rad/s, still lower than Q_heading at moderate error, but doubles the resistance to the spin-equilibrium attractor.  R_rudder bump deferred until we see whether 20 alone closes the post-pivot pinwheel.
+       # NOTE: a context-gated anti-reverse residual (straight_gate ·
+        # max(0, -u), Q=100) was tried briefly as a 12th MPCC weight to
+        # break the reverse-during-dive pathology on gentle_dive_test_wide_2.
+        # It had no observable effect — the solver still commanded reverse
+        # on the straight dive.  Plausible reasons the gate approach
+        # failed: (a) the gate itself was fine (gate≈1 on the dive) but
+        # Q=100 gives only ~1/stage cost at u=-0.1, too small vs whatever
+        # other cost was pulling reverse; (b) the pathology is not a
+        # "reverse-surge basin" steady state at all, but a short transient
+        # at a specific path feature (dive-transition pitch kick?) that
+        # the horizon-integrated anti-reverse penalty can't prevent.
+        # Reverted; see git history for the full residual implementation.
+        # NOTE: a Q_fwd_bias entry was briefly added here as an 11th weight to
+        # tie-break between the forward/reverse basins of a symmetric
+        # e_heading = sin(yaw_err) cost.  That approach failed structurally:
+        # symmetric heading produces a bifurcated landscape (two zero-cost
+        # basins separated by a ridge at yaw_err = ±π/2), and the solver's
+        # warm-start non-deterministically picks a basin.  No scalar weight
+        # can simultaneously (a) keep the return leg pinned in the forward
+        # basin against lateral-correction overshoot and (b) let the pivot
+        # hop into the reverse basin cheaply enough for a K-turn to emerge.
+        # The ridge disappears only when Q_fwd_bias ≥ Q_heading/2 = 150, by
+        # which point K-turns are prohibitively expensive (600/stage at π).
+        # Reverted to atan2 heading (monotonic, single basin); K-turn
+        # accessibility now depends on e_l cost overcoming heading cost
+        # during sharp pivots — bumping Q_lag is the next knob if the
+        # tightest turns time out.
+        # NOTE: an LCG-toward-neutral trim attractor (e_lcg_neutral =
+        # (x[14] - 50)·gate_flat with gate_flat = 1/(1+K·t_hat[2]²)) and
+        # a companion body-pitch-toward-zero residual (e_pitch_flat =
+        # (-fwd_z)·gate_flat) were tried as 12th and 13th MPCC weights
+        # to break the LCG-forward absorbing basin and the surge-coupled
+        # depth oscillation it enabled (pitched body + variable surge →
+        # vertical motion overshoots depth → reverse → overshoots up →
+        # repeat).  Multiple gating + weight combinations were tried:
+        #   * Ungated, Q_lcg=0.02, 0.05: too weak — LCG still parked at 95.
+        #   * t_horiz = sqrt(tx²+ty²) gate, Q_lcg=0.5, Q_pitch_flat=5000:
+        #     gate stayed ~0.9 across the 17–27° dive sections of the
+        #     gentle_dive trajectories, so the residuals fought the dive
+        #     and the vehicle would not descend.
+        #   * gate_flat = 1/(1+200·t_hat[2]²), Q_lcg=0.5, Q_pitch_flat=5000:
+        #     dive-fighting fixed (gate ≈ 0.06 at 17°), but flat-section
+        #     LCG-park behaviour was not measurably improved either.
+        # Reverted; the loop is not closable from this single cost knob
+        # with the current dynamics model.  Possible follow-ups if this
+        # is revisited: separate "depth-hold" mode that hard-routes
+        # depth through VBS, decoupling pitch reference from path tangent
+        # entirely (replace e_pitch with pitch-toward-zero everywhere
+        # and let lag/contour terms handle path tracking), or modelling
+        # changes that make VBS-driven depth correction locally cheaper
+        # than pitch+thrust inside a 4.5 s horizon.
         Q = np.diag(Q_diag)
 
 
@@ -102,17 +154,41 @@ class NMPC:
 
 
         # Parameter vector layout:
-        #   [state_ref(21), control_ref(7), goal_pos(3), t_hat(3), theta_hat(1)]
-        # Total = nx + nu + 3 + 3 + 1 = 35
-        n_params = self.nx + self.nu + 3 + 3 + 1
+        #   [state_ref(21), control_ref(7), goal_pos(3), t_hat(3), theta_hat(1), t_local_hat(3)]
+        # Total = nx + nu + 3 + 3 + 1 + 3 = 38
+        #
+        # t_hat is the LOOKAHEAD tangent (path tangent ~heading_offset ahead
+        # of theta_hat, see DiveControllerMPC.get_current_ref_array).  It
+        # feeds the COST (position + attitude + sync residuals) so the
+        # vehicle anticipates upcoming curvature.  heading_offset is kept
+        # short enough that t_hat does not sample past the next tight curve
+        # from the dive approach — that was the root cause of the
+        # "premature rotation at waypoint 4" pathology on
+        # gentle_dive_test_wide_2.
+        # t_local_hat is the LOCAL tangent at theta_hat itself.  It feeds
+        # the TRACK CONSTRAINT only (h_track = ||e_c||^2 with the local
+        # perpendicular): using the lookahead tangent there made the
+        # constraint measure distance to a line that pointed slightly off-
+        # path on curves, letting the vehicle drift far from the spline
+        # while still satisfying ||e_c|| <= r_track.  Splitting the two
+        # restores the geometric meaning of the tube ("perpendicular
+        # distance from the local path") while keeping the lookahead
+        # anticipation in the cost.
+        # (An earlier revision fed t_local_hat into the attitude/sync
+        # residuals as well; that version regressed on this trajectory
+        # because stage-0 attitude lost its anticipation, so the vehicle
+        # could not distribute the hairpin's 180° yaw change over enough
+        # arc length to stay below rudder saturation.  Reverted; see the
+        # long comment in compute_stage_cost.)
+        n_params = self.nx + self.nu + 3 + 3 + 1 + 3
         self.ocp.parameter_values = np.zeros((n_params,))
 
         # Declare the symbolic parameter vector so CasADi expressions can index it.
         p_sym = ca.MX.sym("p", n_params)
         self.model.p = p_sym
 
-        self.n_stage_cost = 10 + self.nu   # 10 MPCC residuals + 7 control rates = 17
-        self.n_terminal_cost = 10 + 1       # 10 MPCC residuals + heave velocity
+        self.n_stage_cost = 11 + self.nu   # 11 MPCC residuals (incl. yaw-rate) + 7 control rates = 18
+        self.n_terminal_cost = 11 + 1       # 11 MPCC residuals (incl. yaw-rate) + heave velocity = 12
 
         # We have the cost defined in the model.
         self.ocp.cost.yref = np.zeros((self.n_stage_cost,))
@@ -177,6 +253,23 @@ class NMPC:
         # headroom so the solver can't cruise faster than the brake can
         # stop.  v_theta_max tracks surge_max via the line below so the
         # sync coupling stays consistent.
+        # SIM: briefly softened 0.4 -> 0.3 to tame post-pivot recovery on
+        # the y=0.5 return trajectory, then reverted back to 0.4.  The
+        # problem with 0.3 was that surge_min stayed at -0.4 (reverse
+        # authority UNCHANGED), so the forward/reverse bounds became
+        # asymmetric — reverse had 33 % more authority than forward,
+        # which biased the solver toward "go backwards to close lag"
+        # over "go forward to close lag" whenever the local trade-off
+        # was close.  That showed up as "goes backward for no reason"
+        # and "stuck in pivot" runs: with reverse locally cheaper,
+        # the solver kept finding reverse-dominant paths that never
+        # completed the forward approach to the return leg.  Back at
+        # ±0.4 the two directions are symmetric again and the solver
+        # has no structural reason to prefer reverse.  The recovery
+        # overshoot that motivated 0.3 was addressed geometrically by
+        # relaxing the return-leg offset (y=0.5 -> y=1.0) in the
+        # trajectory, so the ballistic-overshoot concern that made 0.3
+        # attractive no longer applies.
         surge_max = 0.4   # m/s
         # SIM: reopened from -0.1 to -0.4 so reverse has the same top speed
         # as forward — lets the solver use reverse thrust for tight turns,
@@ -314,21 +407,76 @@ class NMPC:
         #   uh[-1] = new_r ** 2
         #   solver.constraints_set(k, "uh", uh)
 
-        # Compute e_c_vec symbolically from model state and parameters (same
-        # path geometry as the stage cost) so the track constraint shares the
-        # same linearization point as the cost.
+        # Compute e_c_vec symbolically for the track constraint using the
+        # LOCAL tangent (t_local_hat), not the lookahead tangent (t_hat) used
+        # by the cost.  Reason: e_c_vec - e_l * t_hat is the perpendicular
+        # distance from the vehicle to the line through p_ref in direction
+        # t_hat.  When t_hat is the lookahead (a tangent ~1 m further down
+        # the path), that line points away from the local path on curves,
+        # which lets the vehicle drift far from the spline while still
+        # satisfying ||e_c|| <= r_track.  t_local_hat is the tangent at
+        # p_ref itself, so the perpendicular plane through p_ref is the
+        # actual osculating-plane normal direction at first order — the
+        # tube measured against it is a meaningful "distance to local path"
+        # to within O(curvature * |theta - theta_hat|^2).
         _idx_t = self.nx + self.nu + 3
-        _t_hat = self.model.p[_idx_t : _idx_t + 3]
+        _t_hat = self.model.p[_idx_t : _idx_t + 3]               # lookahead (cost)
         _theta_hat = self.model.p[_idx_t + 3]
+        _t_local_hat = self.model.p[_idx_t + 4 : _idx_t + 7]      # local (constraint)
         _theta = self.model.x[self.N_PHYS_STATES]
         _p_ref = self.model.p[:3]
-        _path_pos = _p_ref + _t_hat * (_theta - _theta_hat)
-        _pos_diff = self.model.x[:3] - _path_pos
-        _e_l = ca.dot(_pos_diff, _t_hat)
-        self.model.e_c_vec = _pos_diff - _e_l * _t_hat
+        # Cost-side e_c_vec (uses lookahead tangent — kept on self.model for
+        # any external diagnostics that may grab it).
+        _path_pos_cost = _p_ref + _t_hat * (_theta - _theta_hat)
+        _pos_diff_cost = self.model.x[:3] - _path_pos_cost
+        _e_l_cost = ca.dot(_pos_diff_cost, _t_hat)
+        self.model.e_c_vec = _pos_diff_cost - _e_l_cost * _t_hat
 
-        h_track = ca.dot(self.model.e_c_vec, self.model.e_c_vec)
-        self.r_track = 1.0  # [m] wide tube to accommodate multi-point turn deviations
+        # Constraint-side e_c_vec (uses local tangent).  Note that the
+        # perpendicular component is invariant to the parallel "slide" along
+        # the tangent, so we evaluate it directly against p_ref instead of
+        # along _t_local_hat (the (theta - theta_hat) shift would only add a
+        # vector along _t_hat, which is not perpendicular to _t_local_hat
+        # except on straight paths and would corrupt the tube on curves).
+        _pos_diff_track = self.model.x[:3] - _p_ref
+        _e_l_track = ca.dot(_pos_diff_track, _t_local_hat)
+        _e_c_track_vec = _pos_diff_track - _e_l_track * _t_local_hat
+
+        h_track = ca.dot(_e_c_track_vec, _e_c_track_vec)
+        # SIM: 1.0 -> 0.5.  The 1.0 m tube was chosen to accommodate the
+        # tight y=0.5 pivot where the vehicle had to swing wide through a
+        # forward/reverse sequence and could deviate nearly a metre from
+        # the linearized tangent during the maneuver.  That was a "worst-
+        # case safety margin" tube, not a tracking tube — below 1 m the
+        # only pull toward the path was Q_contour=700, which the solver
+        # was willing to pay (e.g. trading 343/stage contour cost for
+        # ~400/stage lag or heading-smoothing benefit on the dive curve),
+        # so the vehicle routinely cruised 0.5–1.0 m off-path on the
+        # descending straight leg.  User reported this as "track
+        # constraints don't seem to be obeyed, overshoots quite a bit on
+        # the dive".
+        #
+        # 0.5 m is a TRACKING tube: below that the contour cost still
+        # dominates, but any excursion beyond 0.5 m now pays the soft
+        # slack penalty (Z_track=1e5 quadratic + z_track=1e3 linear on
+        # e_c²), which at ||e_c||=0.7 m gives an extra ~6000/stage on top
+        # of the contour cost — enough to make even short-term excursions
+        # expensive.  With the relaxed y=1.0 trajectory the pivot no
+        # longer needs the 1 m safety margin (effective curvature radius
+        # is ~0.5 m now, not 0.25 m).  If a future trajectory is tighter
+        # and the pivot itself starts violating, either raise r_track
+        # back toward 1.0 or use set_track_radius() to widen the tube
+        # only for the pivot stages.
+        #
+        # NOTE: as of the t_local_hat split, the tube is measured against
+        # the LOCAL path tangent (not the lookahead used by the cost), so
+        # 0.5 m here now reflects the actual perpendicular distance from
+        # the spline to first order in path curvature.  Previously the
+        # constraint was measuring distance to a line ~1 m further down
+        # the path, which on curves let the vehicle sit considerably
+        # further from the spline than r_track suggested — that was the
+        # "track constraint isn't keeping me within 0.5 m" pathology.
+        self.r_track = 0.5  # [m] tracking tube — excursions beyond this bite the slack penalty
         self.IDX_TRACK = 3  # index of h_track inside con_h for dynamically updating track radius
 
         # ----- Wall-lock parameters ---------------------------------------------------
@@ -400,8 +548,8 @@ class NMPC:
         Z_dz    = 200.0 # quadratic penalty for RPM deadzone
         z_dz    = 20.0  # linear   penalty for RPM deadzone
 
-        Z_track = 1e5   # quadratic penalty for track tube violation
-        z_track = 1e3   # linear   penalty for track tube violation
+        Z_track = 1e7   # quadratic penalty for track tube violation
+        z_track = 1e5   # linear   penalty for track tube violation
 
         Z_pitch = 1e7   # quadratic penalty for pitch limit violation (softened to prevent solver crashes on transient overshoots)
         z_pitch = 1e5   # linear   penalty for pitch limit violation
@@ -553,19 +701,39 @@ class NMPC:
 
         Stage  (terminal=False):
           [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1),
-           e_rudder_auth(1), e_stern_auth(1), u_phys(6), delta_v_theta(1)] = 17
+           e_rudder_auth(1), e_stern_auth(1), yaw_rate(1), u_phys(6),
+           delta_v_theta(1)] = 18
 
         Terminal (terminal=True):
           [e_c_vec(3), e_l(1), v_theta(1), e_heading(1), e_pitch(1), e_sync(1),
-           e_rudder_auth(1), e_stern_auth(1), heave_vel(1)] = 11
+           e_rudder_auth(1), e_stern_auth(1), yaw_rate(1), heave_vel(1)] = 12
+
+        Direction convention: e_sync (|v_along|) and e_pitch (smooth-signed)
+        are invariant under vehicle-heading reversal (fwd -> -fwd), so
+        reverse surge through a dive is dynamically and sync-consistent.
+        e_heading is NOT symmetric on purpose: atan2 gives a monotonic,
+        single-basin cost over (-π, π] that strongly pins the vehicle
+        forward along the path tangent.  A symmetric heading residual
+        (tried briefly as sin(yaw_err), with a Q_fwd_bias tiebreaker) was
+        removed because it produced a bifurcated cost landscape the SQP
+        warm-start picks non-deterministically — the return leg either
+        over-rotated to the reverse basin (270° overshoot) or the pivot
+        couldn't hop into the reverse basin cheaply enough.  K-turn
+        emergence in the current formulation depends on e_l / e_c_vec
+        cost overwhelming e_heading at very tight curvatures; Q_lag is
+        the knob if the tightest turns don't clear.  For anything that
+        won't clear with this cost alone, shape the trajectory instead
+        (e.g. a wider tangent-matched arc at the pivot, or K-turn
+        waypoints made explicit in the path).
 
         p vector layout (set in DiveControllerMPC.update):
-          p[0 : nx]            = state ref   (nx = 21)
-          p[nx : nx+nu]        = control ref (nu = 7)
-          p[nx+nu : nx+nu+3]   = goal_pos    (3)
-          p[nx+nu+3 : nx+nu+6] = t_hat       (3)
-          p[nx+nu+6]           = theta_hat   (1)
-          Total = 21 + 7 + 3 + 3 + 1 = 35
+          p[0 : nx]              = state ref     (nx = 21)
+          p[nx : nx+nu]          = control ref   (nu = 7)
+          p[nx+nu : nx+nu+3]     = goal_pos      (3)
+          p[nx+nu+3 : nx+nu+6]   = t_hat         (3)  — lookahead tangent (cost)
+          p[nx+nu+6]             = theta_hat     (1)
+          p[nx+nu+7 : nx+nu+10]  = t_local_hat   (3)  — local tangent (track constraint)
+          Total = 21 + 7 + 3 + 3 + 1 + 3 = 38
         """
         #if terminal:
         #    pos_error = x[:3] - p[:3]
@@ -594,8 +762,17 @@ class NMPC:
         idx_t = x.rows() + u.rows() + 3   # skip ref_row + goal_pos
         t_hat = p[idx_t : idx_t + 3]
         theta_hat = p[idx_t + 3]
+        # t_local_hat is still parsed here (used by the track constraint
+        # elsewhere in this file), but compute_stage_cost does NOT use it
+        # for attitude or sync residuals any more — see the big comment
+        # below for the history of that decision.
         theta = x[self.N_PHYS_STATES]          # x[19]
 
+        # All cost residuals below use t_hat (the lookahead tangent).
+        # heading_offset is tuned in DiveControllerMPC so that the
+        # lookahead distance is short enough NOT to reach past the next
+        # tight curve from the dive approach (see the matching comment
+        # there).
         path_pos = p_ref + t_hat * (theta - theta_hat)
         pos_diff = x[:3] - path_pos
         e_l = ca.dot(pos_diff, t_hat)
@@ -606,44 +783,92 @@ class NMPC:
         fwd_x = 1 - 2 * (q2_s**2 + q3_s**2)
         fwd_y = 2 * (q1_s * q2_s + q0_s * q3_s)
         fwd_z = 2 * (q1_s * q3_s - q0_s * q2_s)
+        # SIM: attitude/sync residuals use t_hat (lookahead tangent).
+        # Brief history: an earlier revision switched these to t_local_hat
+        # (tangent at the linearization point, no lookahead) because the
+        # lookahead form was driving premature rotation on the dive
+        # approach of gentle_dive_test_wide_2: at theta ≈ 5.88 (0.4 m
+        # before the pivot start at s = 6.28), stage 0's t_hat sampled
+        # the y-spline derivative at s = 6.88 (inside the +Y pivot leg),
+        # giving |t_hat_y| ≈ 0.999.  That made yaw_ref swing to +90°
+        # while the vehicle was still on the straight dive.  The
+        # t_local_hat switch fixed that but introduced two new failure
+        # modes on the same trajectory: (i) tail-first reverse cruise
+        # on the return leg (cos_align agnostic about surge sign once
+        # combined with the earlier magnitude-based e_sync), (ii)
+        # a transient reverse-surge at the very start of the dive where
+        # the projection-based t_local at theta ≈ 0 gave the solver a
+        # locally preferred reverse initialisation.  Reverting to t_hat
+        # here AND shrinking heading_offset from 1.0 → 0.3 in
+        # DiveControllerMPC.get_current_ref_array keeps the premature-
+        # rotation fix while not perturbing the rest of the tuning
+        # (surge_min, Q_sync, Q_heading balances were all chosen under
+        # the t_hat form).  e_sync stays signed (see below).
         cos_align = fwd_x * t_hat[0] + fwd_y * t_hat[1] + fwd_z * t_hat[2]
         # Yaw-only heading: atan2(cross, dot) of horizontal projections.
         # Returns the signed yaw error in radians, decoupled from pitch.
-        # Unlike 1-cos which has zero Jacobian at 0° (no directional signal
-        # for the SQP linearization, causing random left/right drift),
-        # atan2 has a linear gradient at small errors AND is monotonic
-        # over (-180°, 180°) with maximum cost at 180° (no spurious
-        # equilibrium like the sin cross-product).
+        # Monotonic over (-π, π] with a single minimum at yaw_err = 0 and
+        # maximum at ±π (reverse-aligned, cost Q_heading·π² ≈ 3000/stage).
+        # This is STRONGLY asymmetric on purpose: the alternative tried
+        # briefly — e_heading = h_cross = sin(yaw_err), symmetric between
+        # forward and reverse — produced a bifurcated cost landscape
+        # (two zero-cost basins separated by a ridge at yaw_err = ±π/2)
+        # whose basin selection was decided non-deterministically by the
+        # SQP warm-start.  That manifested as either 270° over-rotation
+        # on the return leg (solver fell into the reverse basin during a
+        # lateral-correction overshoot) or failure to pivot at all (no
+        # Q_fwd_bias tiebreaker weight could simultaneously satisfy both
+        # cases, since the ridge disappears only at Q_fwd_bias ≥
+        # Q_heading/2 at which point K-turns cost 600/stage).  The atan2
+        # form trades K-turn emergence for predictability; sharp-turn
+        # trajectories should be shaped geometrically (wider arc, or
+        # explicit K-turn waypoints) rather than relying on the cost to
+        # invert direction autonomously.
         h_dot = fwd_x * t_hat[0] + fwd_y * t_hat[1]
         h_cross = fwd_x * t_hat[1] - fwd_y * t_hat[0]
         e_heading = ca.atan2(h_cross, h_dot)
-        
-        # sin based error with max penalty at 90 degrees, but 0 at 0 degrees and 180 degrees
-        #e_heading = h_cross / ca.sqrt(h_cross**2 + h_dot**2 + 1e-6)
 
-        
-        # Old version
-        #fwd_h_norm = ca.sqrt(fwd_x**2 + fwd_y**2 + 1e-6)
-        #t_h_norm = ca.sqrt(t_hat[0]**2 + t_hat[1]**2 + 1e-6)
-        #e_heading = 1 - h_dot / (fwd_h_norm * t_h_norm)
-
-        # Pitch alignment: sin(pitch_state) - sin(pitch_ref).
-        # sin(pitch) = -fwd_z = 2*(q0*q2 - q1*q3), smooth polynomial in quaternion.
-        # sin(pitch_ref) = -t_hat[2] (from the path tangent).
-        # Unlike 1-cos (quartic near zero), this has a LINEAR gradient for
-        # small pitch errors, giving the solver real incentive to level out.
-        e_pitch = (-fwd_z) - (-t_hat[2])
-        
-        # When going backwards, we might want a different pitch angle
-        #smooth_sign = cos_align / ca.sqrt(cos_align**2 + 1e-4)
-        #e_pitch = smooth_sign * (-fwd_z) - (-t_hat[2])
+        # SIM: direction-symmetric pitch residual.  smooth_sign is a smooth
+        # approximation of sign(cos_align) — +1 when vehicle is forward-
+        # aligned with the path, -1 when reverse-aligned, continuous through
+        # 0 (the ε regulariser keeps the Jacobian bounded).  Meaning:
+        #   forward leg (cos_align ≈ +1):  e_pitch = (-fwd_z) - (-t_hat[2])
+        #     — match nose pitch to path pitch (original behaviour).
+        #   reverse leg (cos_align ≈ -1):  e_pitch = -(-fwd_z) - (-t_hat[2])
+        #     — nose pitch inverts relative to path pitch: on a descending
+        #     path traversed backwards, the nose correctly points UP out
+        #     of the dive.
+        # Previously `e_pitch = (-fwd_z) - (-t_hat[2])` with no smooth_sign,
+        # which forced nose-down on any descending tangent and made reverse
+        # legs through dives dynamically incoherent.
+        smooth_sign = cos_align / ca.sqrt(cos_align**2 + 1e-4)
+        e_pitch = smooth_sign * (-fwd_z) - (-t_hat[2])
 
         # v_theta: set yref[4] = v_target to pull progress speed toward v_target.
         v_theta = x[self.N_PHYS_STATES + 1]   # x[20]
 
-        # Surge velocity projected onto path tangent.  Couples v_theta to
-        # actual vehicle motion so the solver cannot advance theta without
-        # producing physical velocity (the root cause of the no-movement bug).
+        # SIM: SIGNED progress/velocity synchronization.  Open design
+        # question: the signed form e_sync = v_theta - u·cos_align has a
+        # cos_align-dependent bifurcation.  With v_theta >= 0 and
+        # u ∈ [-0.4, +0.4]:
+        #   cos_align > 0 (forward-aligned): minimum at u > 0.
+        #   cos_align < 0 (reverse-aligned): minimum at u < 0.
+        # That second basin is intentional for trajectories that include
+        # reverse-thrust segments (the vehicle is supposed to be able to
+        # drive tail-first when the path requires it), but it also
+        # creates a trap: any transient over-rotation past 90° off-
+        # tangent drops the solver into the reverse basin, and rudder
+        # authority flips sign at u < 0, so the solver cannot easily
+        # rotate back.  Seen on gentle_dive_test_wide_2 row 691:
+        # yaw_err=-113°, cos_align=-0.35, RPM=-500, sustained ~17 s
+        # drifting 1.27 m off path.
+        # The magnitude form (|v_along|) removes the trap but also
+        # removes the forward/tail-first gradient during forward
+        # cruise, letting actuator inertia pick direction post-pivot.
+        # Both failure modes are well-documented on this trajectory;
+        # the right fix is probably a direction-aware term (path
+        # segments flagged as "forward" vs "reverse" in the trajectory
+        # definition), not a scalar tweak to this residual.
         v_along = x[7] * cos_align
         e_sync = v_theta - v_along
 
@@ -661,16 +886,24 @@ class NMPC:
         e_rudder_auth = x[16]
         e_stern_auth = x[15]
 
+        # Body yaw rate (x[12] = r) feeds a direct Q_r * r² penalty — see
+        # the Q_diag comment on the 11th entry for the sizing rationale.
+        # Deliberately NOT using a reference (so yref[10] stays 0): we want
+        # to penalise magnitude, not track a target yaw rate.
+        yaw_rate = x[12]
+
         if terminal:
             return ca.vertcat(
                 e_c_vec, e_l, v_theta, e_heading, e_pitch, e_sync,
                 e_rudder_auth, e_stern_auth,
+                yaw_rate,
                 x[9],
             )
         else:
             return ca.vertcat(
                 e_c_vec, e_l, v_theta, e_heading, e_pitch, e_sync,
                 e_rudder_auth, e_stern_auth,
+                yaw_rate,
                 u[:self.N_PHYS_CONTROLS], u[self.N_PHYS_CONTROLS],
             )
 
